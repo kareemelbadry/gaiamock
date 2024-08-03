@@ -49,6 +49,13 @@ double solve_Kepler_equation(double Mi, double ecc, double xtol){
     return EE;
 }
 
+/* This function applies the solve_Kepler_equation() function above to an array of mean anomalies. It populates the results into E_array, an array of eccentric anomalies */
+void solve_Kepler_equation_array(int n_obs, double *M_array, double ecc, double xtol, double *E_array){
+    for(int i = 0; i < n_obs; i++){
+        E_array[i] = solve_Kepler_equation(M_array[i], ecc, xtol);
+    }
+}
+
 /* This function predicts radial velocities at an array of mjds (length n). "RVs" is an input array that will be modified by the function. */
 void predict_radial_velocties(int n, double *mjds, double *RVs, double P, double phi_p, double ecc, 
     double omega, double K, double gamm){
