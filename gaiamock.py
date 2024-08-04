@@ -394,6 +394,43 @@ def plot_residuals_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array
     ax[0].set_ylabel('residual (5 par)', fontsize=20)
     ax[1].set_ylabel('residual (9 par)', fontsize=20)
 
+
+def plot_residuals_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array, c_funcs):
+    '''
+    this function takes a set of epoch astrometry (as described by t_ast_yr, psi, plx_factor, ast_obs, and ast_err), and a set of linear parameters for a 7-parameter solution, theta_array = (ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx), and predicts the epoch astrometry. It also calculates the best-fit 5 parameter solution for the same astrometry. Finally, it plots the epoch astrometry residuals as a function of time for both solutions. 
+    '''
+    # 5 parameter solution
+    Cinv = np.diag(1/ast_err**2)    
+    M = np.vstack([np.sin(psi), t_ast_yr*np.sin(psi), np.cos(psi), t_ast_yr*np.cos(psi), plx_factor]).T 
+    mu = np.linalg.solve(M.T @ Cinv @ M, M.T @ Cinv @ ast_obs) #  ra, pmra, dec, pmdec, parallax
+    Lambda_pred = np.dot(M, mu)
+    
+    nrow, width, height_scale = 2, 6, 1
+    xlim = [np.min(t_ast_yr)-0.2, np.max(t_ast_yr)+0.2]
+    f, ax = plt.subplots(nrow, 1, figsize = (width, 1+3*nrow*height_scale))
+    plt.subplots_adjust(hspace = 0)
+    for i in range(nrow):
+        ax[i].set_xlim(xlim)
+        ax[i].tick_params(labelsize = 18)
+        if i != nrow - 1:
+            ax[i].set_xticklabels([])
+    ax[0].errorbar(t_ast_yr, ast_obs - Lambda_pred, yerr=ast_err, fmt='k.')
+    print('single star chi2: %.2f'  % (np.sum( (ast_obs - Lambda_pred)**2 / ast_err**2 )) )
+    
+    # 7 parameter solution
+    M = np.vstack([np.sin(psi), t_ast_yr*np.sin(psi), 1/2*t_ast_yr**2*np.sin(psi), np.cos(psi), t_ast_yr*np.cos(psi), 1/2*t_ast_yr**2*np.cos(psi), plx_factor]).T 
+    Lambda_pred = np.dot(M, theta_array)
+    resids = ast_obs - Lambda_pred
+    chi2 = np.sum(resids**2/ast_err**2)
+    nu = len(ast_obs) - 7 
+    F2 = np.sqrt(9*nu/2)*( (chi2/nu)**(1/3) + 2/(9*nu) -1 )   
+    
+    print('7-parameter chi2: %.2f' % chi2 )
+    ax[1].errorbar(t_ast_yr, ast_obs - Lambda_pred, yerr=ast_err, fmt='k.')
+    ax[1].set_xlabel('time (years)', fontsize=20)
+    ax[0].set_ylabel('residual (5 par)', fontsize=20)
+    ax[1].set_ylabel('residual (7 par)', fontsize=20)
+
     
 def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, p0, c_funcs):
     '''
@@ -429,9 +466,15 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     cov_x = np.linalg.inv(np.dot(J.T, J))  
 
     if not np.sum(~np.isfinite(cov_x)):
-        uncertainties = np.sqrt(np.diag(cov_x)) 
+        chi2 = np.sum(resid_func(p0)**2)
+        nu = 12
+        cc = np.sqrt(chi2/(nu*(1-2/(9*nu))**3 )) # uncertainy inflation factor
+        
+        uncertainties = cc*np.sqrt(np.diag(cov_x)) 
         ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G = p0
         sig_ra_off, sig_dec_off, sig_parallax, sig_pmra, sig_pmdec, sig_period, sig_ecc, sig_phi_p, sig_A, sig_B, sig_F, sig_G = uncertainties
+        
+        # calculate a0 and errors according to halbwachs
         u = 0.5 * (A**2 + B**2 + F**2 + G**2)
         v = A * G - B * F
         a0 = np.sqrt(u + np.sqrt(u**2 - v**2))
@@ -533,6 +576,8 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
         
         if verbose:
             print('7 parameter solution accepted! Not trying anything else.')
+        if show_residuals:
+            plot_residuals_7par(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, theta_array = mu, c_funcs = c_funcs)
         return res
 
     res = fit_orbital_solution_nonlinear(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs)
