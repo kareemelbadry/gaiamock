@@ -825,3 +825,45 @@ def predict_astrometry_and_rvs_simultaneously(t_ast_yr, psi, plx_factor, t_rvs_y
     rv_pred = predict_radial_velocities(t_rvs_day = t_rvs_yr*365.25, period = period, Tp = Tp, ecc = ecc, w = w, K = K1_kms, gamma = gamma, c_funcs = c_funcs)
     
     return Lambda_pred, rv_pred
+    
+def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean_mag, data_release, c_funcs):
+    '''
+    this function predicts the epoch-level astrometry for single source. 
+    ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
+    parallax (mas): the true parallax (i.e., 1/d)
+    pmra, pmdec: true proper motions in mas/yr
+    phot_g_mean_mag: G-band magnitude
+    f: flux ratio, F2/F1, in the G-band. 
+    c_funcs: from read_in_C_functions()
+    '''
+    
+    t = get_gost_one_position(ra, dec, data_release=data_release)
+    
+    # reject a random 10%
+    t = t[np.random.uniform(0, 1, len(t)) > 0.1]
+    psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
+    
+    if data_release == 'dr4':
+        t_ast_day = jds - 2457936.875
+    elif data_release == 'dr3':
+        t_ast_day = jds - 2457389.0
+    elif data_release == 'dr5':
+        t_ast_day = jds - 2458818.5
+    else: 
+        raise ValueError('invalid data_release!')
+    t_ast_yr = t_ast_day/365.25
+    
+    N_ccd_avg = 8
+    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+    
+    if phot_g_mean_mag < 13:
+        extra_noise = np.random.uniform(0, 0.04)
+    else: 
+        extra_noise = 0
+    
+
+    Lambda_pred = pmra*t_ast_yr*np.sin(psi) + pmdec*t_ast_yr*np.cos(psi) + parallax*plx_factor 
+    Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
+    Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
+
+    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
