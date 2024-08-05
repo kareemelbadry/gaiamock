@@ -521,6 +521,9 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
     verbose: whether to print results of fitting. 
     if show_residuals, plot the residuals of the best-fit 5-parameter solution and the best-fit orbital solution. This will only happen if an orbital solution is actually calculated (i.e., we get to that stage in the cascade.)
     '''
+    if c_funcs is None:
+        c_funcs = read_in_C_functions()
+    
     N_ccd_avg = 8
     epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
     
@@ -622,4 +625,203 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
     # lots of stuff that can be useful to return
     return_array = [plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, period, sig_period, phi_p, sig_phi_p, ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, len(t_ast_yr), F2]
     return return_array
+
+def xyz_to_galactic(x, y, z):
+    '''
+    This is a helper function to translate x, y, z (in pc) to l and b (in degrees). 
+    It is mostly needed because the mwdust packaged expects galactic coordinates.
+    We assume the sun is at (0, 0, +20.8), and the x axis points from the position of the Sun projected to the Galactic midplane to the Galactic center.
+    '''
+    z_sun = 20.8 # Sun's height above the galactic plane in pc
+    d_pc = np.sqrt(x**2 + y**2 + (z-z_sun)**2)
+    b = np.arcsin((z-z_sun)/d_pc)
+    cosl, sinl= x/d_pc/np.cos(b), y/d_pc/np.cos(b)
+    l = np.arcsin(sinl)
+    l[cosl < 0] = np.pi - l[cosl < 0]
+    l[(cosl >= 0)*(sinl < 0)] += 2*np.pi
+    return l*180/np.pi, b*180/np.pi
+
+def xyz_to_radec(x, y, z):
+    '''
+    This is a helper function to translate x, y, z (in pc) to ra and dec (in degrees). 
+    We assume the sun is at (0, 0, +20.8), and the x axis points from the position of the Sun projected to the Galactic midplane to the Galactic center.
+    '''
+    z_sun = 20.8  # Sun's height above the galactic plane in pc
+    d_pc = np.sqrt(x**2 + y**2 + (z-z_sun)**2)
+    cosb, sinb = np.sqrt(d_pc**2 - (z-z_sun)**2)/d_pc, (z-z_sun)/d_pc, 
+    cosl, sinl= x/d_pc/cosb, y/d_pc/cosb
+    T = np.array([[-0.05487554,  0.49410945, -0.86766614],
+       [-0.8734371 , -0.44482959, -0.19807639],
+       [-0.48383499,  0.74698225,  0.45598379]])
+    eqXYZ = np.dot(T, np.array([cosb*cosl, cosb*sinl, sinb]))
+    dec, ra = np.arcsin(eqXYZ[2]), np.arctan2(eqXYZ[1], eqXYZ[0])
+    ra[ra < 0] += 2*np.pi
+    return ra*180/np.pi, dec*180/np.pi
+
+def draw_from_exponential_disk(N, hz_pc = 300, hR_pc = 2500):
+    '''
+    this function draws 3D positions from a disk with exponential z and R density profiles with scale height hz_pc and hR_pc. 
+    N: how many samples to draw
+    returns 3D positions in a coordinate system with the sun at (0, 0, 20.8)
+    '''
+    z_sun = 20.8
+    phi = np.random.uniform(0, 1, N)*2*np.pi
+    z = np.random.exponential(scale = hz_pc, size = N)*np.random.choice([-1, 1], size=N)
     
+    xx = np.linspace(0, hR_pc*10, 10000)
+    cdf = -np.exp(-xx/hR_pc)*(xx/hR_pc + 1) + 1
+    R = np.interp(np.random.uniform(0, 1, N), cdf, xx) # this draws from a r*np.exp(-r/h_R) distribution
+    x_gal = np.cos(phi)*R + 8.122e3
+    y_gal = np.sin(phi)*R
+    return x_gal, y_gal, z
+
+def generate_coordinates_at_a_given_distance_exponential_disk(dist_pc, N_stars = 1000, hz_pc = 300, hR_pc=2500):
+    '''
+    this function generates the coordinates (ra, dec, distance) of a set of N_stars sources at a distance dist_pc (actually, within 0.99-1.01 times dist_pc). 
+    If dist_pc is much smaller than hz, it assumes the stellar density is uniform. If it's larger than hz/10 but smaller than hR/3, plane-parallel, an exponential disk is assumed. Finally, if it's larger than hR/3, a disk with exponential density profile in both z and R is assumed. 
+    
+    This is a helper function for simulate_many_realizations_of_a_single_binary().
+    
+    returns:
+        ra, dec: coordinates in degrees
+        d_pc: distance from the sun in pc
+        x, y, z: 3D xyz coordinates 
+    '''
+    z_sun = 20.8  # Sun's height above the galactic plane in pc
+    mult_factor = 10 # how many extra stars to generate (will be increased if not enough)
+    d_min, d_max = dist_pc*0.99, dist_pc*1.01
+    
+    N_found = 0
+    while N_found < N_stars:    
+        NN = mult_factor*N_stars
+        
+        if dist_pc < hz_pc/10: # uniform
+            x, y, z = np.random.uniform(-d_max, d_max, size = NN), np.random.uniform(-d_max, d_max, size = NN), np.random.uniform(-d_max, d_max, size = NN) + z_sun
+        elif (dist_pc > hz_pc/10) and (dist_pc < hR_pc/3): # plane-parallal disk
+            x, y = np.random.uniform(-d_max, d_max, size = NN), np.random.uniform(-d_max, d_max, size = NN)
+            z = np.random.exponential(scale = hz_pc, size = NN)*np.random.choice([-1, 1], size=NN)
+        elif (dist_pc > hR_pc/3):
+            x, y, z = draw_from_exponential_disk(N = NN, hz_pc = hz_pc, hR_pc = hR_pc)
+        else:
+            raise ValueError('the combination of hR and hz you provided is not appropriate for any of our approximations!')    
+                
+        d = np.sqrt(x**2 + y**2 + (z-z_sun)**2)
+        ok = (d < d_max) & (d > d_min)
+        N_found = np.sum(ok)
+        mult_factor *= 2
+    
+    ra, dec = xyz_to_radec(x[ok], y[ok], z[ok])
+    d_pc = d[ok]
+    ra, dec, d_pc = ra[:N_stars], dec[:N_stars], d_pc[:N_stars]
+    return ra, dec, d_pc, x[ok][:N_stars], y[ok][:N_stars], z[ok][:N_stars]
+    
+def simulate_many_realizations_of_a_single_binary(dist_pc, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True):
+    '''
+    this function generates N_realizations realizations of a binary with a given distance, Porb, absolute magnitude, flux ratio, and eccentricity. Sky positions and orientations will be different for each realization. It generates epoch astrometry for each realization, and then fits that astrometry with the standard astrometric cascade. Finally, it reports what fraction of all realizations resulted in an orbital solution that passes all the DR3 cuts.  
+    '''
+    import joblib
+    ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(dist_pc = dist_pc, N_stars = N_realizations, hz_pc = 300)
+    l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
+    
+    if do_dust:
+        import mwdust
+        combined19_ebv = mwdust.Combined19()
+        ebv = combined19_ebv(l_deg, b_deg, np.ones(N_realizations)*dist_pc/1000)
+        A_G = 2.80*ebv
+    else: 
+        if dist_pc > 100:
+            print('you are ignoring dust. This is probably not a good idea at this distance. ')
+        A_G = np.zeros(N_realizations)
+ 
+    Tp = np.random.uniform(0, 1, N_realizations)*period
+    omega =  np.random.uniform(0, 2*np.pi, N_realizations) 
+    w = np.random.uniform(0, 2*np.pi, N_realizations)
+    inc_deg = np.degrees(np.arccos( np.random.uniform(-1, 1, N_realizations)))
+    phot_g_mean_mag = Mg_tot + 5*np.log10(d_pc/10) + A_G
+
+    
+    def search_mock_binary_worker(i):
+        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False)        
+        print(f'did {i}!')
+        return result
+    
+    from joblib import Parallel, delayed
+    res = Parallel(n_jobs=joblib.cpu_count())(delayed(search_mock_binary_worker)(x) for x in range(N_realizations))
+
+    plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, fit_period, sig_period, phi_p, sig_phi_p, fit_ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, N_obs, F2 = np.array(res).T
+
+    plx_over_err, a0_over_err = plx/sig_parallax, a0_mas/sigma_a0_mas
+    
+    accepted = (fit_period > 0) & (a0_over_err > 5) & (plx_over_err > 20000/fit_period) & (a0_over_err > 158/np.sqrt(fit_period)) & (sig_ecc < 0.079*np.log(fit_period)-0.244) 
+    
+    print('%d out of %d solutions had ruwe < 1.4' % (np.sum(fit_period == -1), N_realizations) )
+    print('%d out of %d solutions got 9-parameter solutions' % (np.sum(fit_period == -9), N_realizations) )
+    print('%d out of %d solutions got 7-parameter solutions' % (np.sum(fit_period == -7), N_realizations) )
+    print('%d out of %d solutions passed all cuts and got an orbital solution!' % (np.sum(accepted), N_realizations) )
+    print('%d out of %d solutions got to orbital solutions but failed at least one cut. ' % (np.sum(~accepted & (fit_period > 0)), N_realizations) )
+        
+    return ra, dec, phot_g_mean_mag, Tp, omega, w, inc_deg, accepted
+
+def predict_radial_velocities(t_rvs_day, period, Tp, ecc, w, K, gamma, c_funcs):
+    '''
+    this function predicts radial velocities at times t_rvs_day.
+    period: orbital period in days
+    Tp: periastron time in days
+    ecc: eccentricity
+    w: "little omega" in radians
+    K: RV semi-amplitude in km/s
+    gamma: center of mass RV in km/s
+    c_funcs: from read_in_C_functions()
+    '''
+    t_rvs_double = t_rvs_day.astype(np.double)
+    results_array = np.zeros(len(t_rvs_day), dtype = np.double)   
+     
+    c_funcs.predict_radial_velocties(ctypes.c_int(len(t_rvs_day)), ctypes.c_void_p(t_rvs_double.ctypes.data), ctypes.c_void_p(results_array.ctypes.data), ctypes.c_double(period), ctypes.c_double(2*np.pi*Tp/period), ctypes.c_double(ecc), ctypes.c_double(w), ctypes.c_double(K), ctypes.c_double(gamma))
+    return results_array
+    
+    
+def predict_astrometry_and_rvs_simultaneously(t_ast_yr, psi, plx_factor, t_rvs_yr, period, Tp, ecc, m1, m2, f, parallax, pmra, pmdec, omega, w, inc_deg, gamma, c_funcs):
+    '''
+    This function predicts both astrometry and RV curves for the same binary. They can be sampled at different times. 
+    t_ast_year: times at which the RVs are sampled, in years, relative to the reference epoch
+    psi:  scan angles of the astrometry, in radians
+    plx_factor: parallax factors of the astrometry
+    t_rvs_day: times at which RVs are measured, in years, relative to THE SAME reference epoch as t_ast_yr
+    period: days
+    Tp: periastron time, days
+    ecc: eccentricity
+    m1: mass of star 1, for which we are predicting the RVs, Msun
+    m1: mass of star 2,  Msun
+    f: flux ratio, F2/F1
+    parallax = 1/distance; the true parallax in mas
+    pmra, pmdec = proper motions in mas/yr
+    omega: "big omega" in radians
+    w: "little omega" in radians
+    inc_deg: inclination, in degrees
+    gamma: center-of-mass RV, km/s
+    c_funcs: from read_in_C_functions()
+    '''
+    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
+    a_mas = get_a_mas(period, m1, m2, parallax)
+    inc = inc_deg*np.pi/180
+    A_pred = a_mas*( np.cos(w)*np.cos(omega) - np.sin(w)*np.sin(omega)*np.cos(inc) )
+    B_pred = a_mas*( np.cos(w)*np.sin(omega) + np.sin(w)*np.cos(omega)*np.cos(inc) )
+    F_pred = -a_mas*( np.sin(w)*np.cos(omega) + np.cos(w)*np.sin(omega)*np.cos(inc) )
+    G_pred = -a_mas*( np.sin(w)*np.sin(omega) - np.cos(w)*np.cos(omega)*np.cos(inc) )
+    cpsi, spsi = np.cos(psi), np.sin(psi)
+    
+    X = np.cos(EE) - ecc
+    Y = np.sqrt(1-ecc**2)*np.sin(EE)
+    
+    x, y = B_pred*X + G_pred*Y, A_pred*X + F_pred*Y   
+    rho = np.sqrt(x**2 + y**2) 
+    delta_eta = (-y*cpsi - x*spsi) 
+    bias = np.array([al_bias_binary(delta_eta = delta_eta[i], q=m2/m1, f=f) for i in range(len(psi))])
+    Lambda_pred = pmra*t_ast_yr*spsi + pmdec*t_ast_yr*cpsi + parallax*plx_factor + bias
+    
+    
+    G, Msun = 6.6743e-11, 1.9884098e+30 # SI units
+    K1_kms = 0.001*(2*np.pi*G*(m2*Msun) * (m2/(m1 + m2))**2 / (period*86400 *  (1 - ecc**2)**(3/2)))**(1/3) * np.sin(inc_deg*np.pi/180)
+    rv_pred = predict_radial_velocities(t_rvs_day = t_rvs_yr*365.25, period = period, Tp = Tp, ecc = ecc, w = w, K = K1_kms, gamma = gamma, c_funcs = c_funcs)
+    
+    return Lambda_pred, rv_pred

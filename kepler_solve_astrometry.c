@@ -548,7 +548,7 @@ void run_astfit(double* t_ast_yr, double* psi, double *plx_factor, double* ast_o
             }
         }
         if (count == Neps - 1) {
-            printf("%f %f\n", fbest, chislimit);
+            // printf("%f %f\n", fbest, chislimit);
             if (fbest < chislimit) {
                 repeat = 0;
             } else {
