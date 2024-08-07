@@ -4,7 +4,8 @@ import os
 import ctypes 
 from astropy.table import Table
 import healpy as hp
-    
+import joblib
+
 
 def al_uncertainty_per_ccd_interp(G):
     '''
@@ -675,10 +676,10 @@ def draw_from_exponential_disk(N, hz_pc = 300, hR_pc = 2500):
     y_gal = np.sin(phi)*R
     return x_gal, y_gal, z
 
-def generate_coordinates_at_a_given_distance_exponential_disk(dist_pc, N_stars = 1000, hz_pc = 300, hR_pc=2500):
+def generate_coordinates_at_a_given_distance_exponential_disk(d_min, d_max, N_stars = 1000, hz_pc = 300, hR_pc=2500):
     '''
-    this function generates the coordinates (ra, dec, distance) of a set of N_stars sources at a distance dist_pc (actually, within 0.99-1.01 times dist_pc). 
-    If dist_pc is much smaller than hz, it assumes the stellar density is uniform. If it's larger than hz/10 but smaller than hR/3, plane-parallel, an exponential disk is assumed. Finally, if it's larger than hR/3, a disk with exponential density profile in both z and R is assumed. 
+    this function generates the coordinates (ra, dec, distance) of a set of N_stars sources with distances ranging from d_min to d_max (in pc)
+    If d_max is much smaller than hz, it assumes the stellar density is uniform. If it's larger than hz/10 but smaller than hR/3, plane-parallel, an exponential disk is assumed. Finally, if it's larger than hR/3, a disk with exponential density profile in both z and R is assumed. 
     
     This is a helper function for simulate_many_realizations_of_a_single_binary().
     
@@ -689,18 +690,17 @@ def generate_coordinates_at_a_given_distance_exponential_disk(dist_pc, N_stars =
     '''
     z_sun = 20.8  # Sun's height above the galactic plane in pc
     mult_factor = 10 # how many extra stars to generate (will be increased if not enough)
-    d_min, d_max = dist_pc*0.99, dist_pc*1.01
     
     N_found = 0
     while N_found < N_stars:    
         NN = mult_factor*N_stars
         
-        if dist_pc < hz_pc/10: # uniform
+        if d_max < hz_pc/10: # uniform
             x, y, z = np.random.uniform(-d_max, d_max, size = NN), np.random.uniform(-d_max, d_max, size = NN), np.random.uniform(-d_max, d_max, size = NN) + z_sun
-        elif (dist_pc > hz_pc/10) and (dist_pc < hR_pc/3): # plane-parallal disk
+        elif (d_max > hz_pc/10) and (d_max < hR_pc/3): # plane-parallal disk
             x, y = np.random.uniform(-d_max, d_max, size = NN), np.random.uniform(-d_max, d_max, size = NN)
             z = np.random.exponential(scale = hz_pc, size = NN)*np.random.choice([-1, 1], size=NN)
-        elif (dist_pc > hR_pc/3):
+        elif (d_max > hR_pc/3):
             x, y, z = draw_from_exponential_disk(N = NN, hz_pc = hz_pc, hR_pc = hR_pc)
         else:
             raise ValueError('the combination of hR and hz you provided is not appropriate for any of our approximations!')    
@@ -715,21 +715,20 @@ def generate_coordinates_at_a_given_distance_exponential_disk(dist_pc, N_stars =
     ra, dec, d_pc = ra[:N_stars], dec[:N_stars], d_pc[:N_stars]
     return ra, dec, d_pc, x[ok][:N_stars], y[ok][:N_stars], z[ok][:N_stars]
     
-def simulate_many_realizations_of_a_single_binary(dist_pc, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True):
+def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True):
     '''
-    this function generates N_realizations realizations of a binary with a given distance, Porb, absolute magnitude, flux ratio, and eccentricity. Sky positions and orientations will be different for each realization. It generates epoch astrometry for each realization, and then fits that astrometry with the standard astrometric cascade. Finally, it reports what fraction of all realizations resulted in an orbital solution that passes all the DR3 cuts.  
+    this function generates N_realizations realizations of a binary within a given distance range, for a fixed Porb, absolute magnitude, flux ratio, and eccentricity. Sky positions and orientations will be different for each realization. It generates epoch astrometry for each realization, and then fits that astrometry with the standard astrometric cascade. Finally, it reports what fraction of all realizations resulted in an orbital solution that passes all the DR3 cuts.  
     '''
-    import joblib
-    ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(dist_pc = dist_pc, N_stars = N_realizations, hz_pc = 300)
+    ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = 300)
     l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
     
     if do_dust:
         import mwdust
         combined19_ebv = mwdust.Combined19()
-        ebv = combined19_ebv(l_deg, b_deg, np.ones(N_realizations)*dist_pc/1000)
+        ebv = combined19_ebv(l_deg, b_deg, d_pc/1000)
         A_G = 2.80*ebv
     else: 
-        if dist_pc > 100:
+        if d_min > 100:
             print('you are ignoring dust. This is probably not a good idea at this distance. ')
         A_G = np.zeros(N_realizations)
  
@@ -760,7 +759,7 @@ def simulate_many_realizations_of_a_single_binary(dist_pc, period, Mg_tot, f, m1
     print('%d out of %d solutions passed all cuts and got an orbital solution!' % (np.sum(accepted), N_realizations) )
     print('%d out of %d solutions got to orbital solutions but failed at least one cut. ' % (np.sum(~accepted & (fit_period > 0)), N_realizations) )
         
-    return ra, dec, phot_g_mean_mag, Tp, omega, w, inc_deg, accepted
+    return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, inc_deg, accepted
 
 def predict_radial_velocities(t_rvs_day, period, Tp, ecc, w, K, gamma, c_funcs):
     '''
