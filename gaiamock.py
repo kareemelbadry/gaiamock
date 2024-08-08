@@ -468,7 +468,7 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
 
     if not np.sum(~np.isfinite(cov_x)):
         chi2 = np.sum(resid_func(p0)**2)
-        nu = 12
+        nu = len(ast_obs) - 12
         cc = np.sqrt(chi2/(nu*(1-2/(9*nu))**3 )) # uncertainy inflation factor
         
         uncertainties = cc*np.sqrt(np.diag(cov_x)) 
