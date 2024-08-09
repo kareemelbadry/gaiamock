@@ -467,7 +467,8 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
         nu = len(ast_obs) - 12
         cc = np.sqrt(chi2/(nu*(1-2/(9*nu))**3 )) # uncertainy inflation factor
         
-        uncertainties = cc*np.sqrt(np.diag(cov_x)) 
+        uncertainties = cc*np.sqrt(np.diag(cov_x))
+
         ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G = p0
         sig_ra_off, sig_dec_off, sig_parallax, sig_pmra, sig_pmdec, sig_period, sig_ecc, sig_phi_p, sig_A, sig_B, sig_F, sig_G = uncertainties
         
@@ -482,8 +483,8 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
         t_F = F + (F * u + B * v) / np.sqrt(u**2 - v**2)
         t_G = G + (G * u - A * v) / np.sqrt(u**2 - v**2)
         
-        covAB, covAF, covAG = cov_x[8, 9], cov_x[8,10], cov_x[8, 11]
-        covBF, covBG, covFG = cov_x[9,10], cov_x[9,11], cov_x[10,11]
+        covAB, covAF, covAG = cov_x[8, 9]*cc**2, cov_x[8,10]*cc**2, cov_x[8, 11]*cc**2
+        covBF, covBG, covFG = cov_x[9,10]*cc**2, cov_x[9,11]*cc**2, cov_x[10,11]*cc**2
         
         under_radical = t_A**2 * sig_A**2 + t_B**2 * sig_B**2 + t_F**2 * sig_F**2 + t_G**2 * sig_G**2 + 2 * t_A * t_B * covAB + 2 * t_A * t_F * covAF + 2 * t_A * t_G * covAG + 2 * t_B * t_F * covBF + 2 * t_B * t_G * covBG + 2 * t_F * t_G * covFG 
         
@@ -491,6 +492,7 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
             sigma_a0 = 1 / (2 * a0) * np.sqrt(under_radical)
         else:
             sigma_a0 = a0*1000
+
 
     else:
         uncertainties = np.ones(len(p0))*1000
@@ -738,28 +740,27 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     
     def search_mock_binary_worker(i):
         result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False)        
-        #print(f'did {i}!')
         return result
     
     from joblib import Parallel, delayed
     res = Parallel(n_jobs=joblib.cpu_count())(delayed(search_mock_binary_worker)(x) for x in range(N_realizations))
 
-    plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, fit_period, sig_period, phi_p, sig_phi_p, fit_ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, N_obs, F2 = np.array(res).T
+    plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, fit_period, sig_period, phi_p, sig_phi_p, fit_ecc, sig_ecc, fit_inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, N_obs, F2 = np.array(res).T
 
     plx_over_err, a0_over_err = plx/sig_parallax, a0_mas/sigma_a0_mas
     
-    #accepted = (fit_period > 0) & (a0_over_err > 5) & (plx_over_err > 20000/fit_period) & (a0_over_err > 158/np.sqrt(fit_period)) & (sig_ecc < 0.079*np.log(fit_period)-0.244) 
     accepted, ok = np.zeros(len(plx), dtype=bool), fit_period > 0
     passed_cuts = (a0_over_err[ok] > 5) & (plx_over_err[ok] > 20000/fit_period[ok]) & (a0_over_err[ok] > 158/np.sqrt(fit_period[ok])) & (sig_ecc[ok] < 0.079*np.log(fit_period[ok])-0.244) 
     accepted[ok] = passed_cuts
-    
+
+    print('%d out of %d solutions had insufficient visibility periods' % (np.sum(fit_period == 0), N_realizations) )    
     print('%d out of %d solutions had ruwe < 1.4' % (np.sum(fit_period == -1), N_realizations) )
     print('%d out of %d solutions got 9-parameter solutions' % (np.sum(fit_period == -9), N_realizations) )
     print('%d out of %d solutions got 7-parameter solutions' % (np.sum(fit_period == -7), N_realizations) )
     print('%d out of %d solutions passed all cuts and got an orbital solution!' % (np.sum(accepted), N_realizations) )
     print('%d out of %d solutions got to orbital solutions but failed at least one cut. ' % (np.sum(~accepted & (fit_period > 0)), N_realizations) )
         
-    return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, inc_deg, accepted
+    return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted
 
 def predict_radial_velocities(t_rvs_day, period, Tp, ecc, w, K, gamma, c_funcs):
     '''
