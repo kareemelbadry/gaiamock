@@ -210,7 +210,7 @@ def al_bias_binary(delta_eta, q, f, u = 90):
         deta = -q/(1+q)*delta_eta
     return deta
     
-def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, epoch_err_mas, f, data_release, c_funcs, extra_noise = 0.0):
+def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs):
     '''
     this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia. 
     ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
@@ -224,11 +224,10 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     omega: "big Omega" in radians
     inc: inclination in radians, defined so that 0 or pi is face-on, and pi/2 is edge-on. 
     w: "little omega" in radians
-    epoch_err_mas: this is the uncertainty in AL displacement per FOV transit (not per CCD)
+    phot_g_mean_mag: G-band magnitude 
     f: flux ratio, F2/F1, in the G-band. 
     data_release: 'dr3', 'dr4', or 'dr5'
     c_funcs: from read_in_C_functions()
-    extra_noise: additional noise to optionally be added to the epoch astrometry, without inflating formal uncertainties.
     '''
     
     t = get_gost_one_position(ra, dec, data_release=data_release)
@@ -245,6 +244,14 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
         t_ast_day = jds - 2458818.5
     else: 
         raise ValueError('invalid data_release!')
+        
+    N_ccd_avg = 8
+    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+    
+    if phot_g_mean_mag < 13:
+        extra_noise = np.random.uniform(0, 0.04)
+    else: 
+        extra_noise = 0
 
     t_ast_yr = t_ast_day/365.25
     EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_day - Tp), ecc = ecc, c_funcs = c_funcs)
@@ -265,10 +272,10 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     Lambda_com = pmra*t_ast_yr*spsi + pmdec*t_ast_yr*cpsi + parallax*plx_factor # barycenter motion
     Lambda_pred = Lambda_com + bias # binary motion
 
-    Lambda_pred += epoch_err_mas*np.random.randn(len(psi)) # modeled noise
+    Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
     Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
 
-    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_mas*np.ones(len(Lambda_pred))
+    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
 
 def get_a_mas(period, m1, m2, parallax):
     '''
@@ -523,16 +530,8 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
     '''
     if c_funcs is None:
         c_funcs = read_in_C_functions()
-    
-    N_ccd_avg = 8
-    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
-    
-    if phot_g_mean_mag < 13:
-        extra_noise = np.random.uniform(0, 0.04)
-    else: 
-        extra_noise = 0
-    
-    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, epoch_err_mas = epoch_err_per_transit, f=f, data_release=data_release, c_funcs=c_funcs, extra_noise=extra_noise)
+
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs)
     
     Nret = 22 # number of arguments to return 
     N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)

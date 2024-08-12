@@ -22,3 +22,6 @@ gcc -shared -o kepler_solve_astrometry.so kepler_solve_astrometry.c -lgsl -lgslc
 If everything works, this will create a compiled file gaiamock/kepler_solve_astrometry.so. If it didn't work, there is probably a problem with the linking of your GSL installation.
 
 (5) You are ready to go! Some basic functionality is demonstrated in the demo.ipynb notebook. 
+
+A simple bash submission script to run on a cluster is provided in example_bash_submission.py. That reproduces Fig 13 of the paper. 
+
