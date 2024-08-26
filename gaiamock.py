@@ -210,6 +210,23 @@ def al_bias_binary(delta_eta, q, f, u = 90):
         deta = -q/(1+q)*delta_eta
     return deta
     
+def rescale_times_astrometry(jd, data_release):
+    '''
+    calculating the time in years relative to the reference epoch, which is different for each data release. 
+    jd is the time in days
+    data_release is dr3, dr4, or dr5
+    '''
+    if data_release == 'dr3':
+        t_ast_day = jd - 2457389.0
+    elif data_release == 'dr4':
+        t_ast_day = jd - 2457936.875
+    elif data_release == 'dr5':
+        t_ast_day = jd - 2458818.5
+    else: 
+        raise ValueError('invalid data_release!')
+    t_ast_yr = t_ast_day/365.25
+    return t_ast_yr
+    
 def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs):
     '''
     this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia. 
@@ -235,16 +252,8 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     # reject a random 10%
     t = t[np.random.uniform(0, 1, len(t)) > 0.1]
     psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
+    t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
     
-    if data_release == 'dr4':
-        t_ast_day = jds - 2457936.875
-    elif data_release == 'dr3':
-        t_ast_day = jds - 2457389.0
-    elif data_release == 'dr5':
-        t_ast_day = jds - 2458818.5
-    else: 
-        raise ValueError('invalid data_release!')
-        
     N_ccd_avg = 8
     epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
     
@@ -253,8 +262,7 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     else: 
         extra_noise = 0
 
-    t_ast_yr = t_ast_day/365.25
-    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_day - Tp), ecc = ecc, c_funcs = c_funcs)
+    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
     a_mas = get_a_mas(period, m1, m2, parallax)
     A_pred = a_mas*( np.cos(w)*np.cos(omega) - np.sin(w)*np.sin(omega)*np.cos(inc) )
     B_pred = a_mas*( np.cos(w)*np.sin(omega) + np.sin(w)*np.cos(omega)*np.cos(inc) )
@@ -266,7 +274,6 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     Y = np.sqrt(1-ecc**2)*np.sin(EE)
     
     x, y = B_pred*X + G_pred*Y, A_pred*X + F_pred*Y   
-    rho = np.sqrt(x**2 + y**2) 
     delta_eta = (-y*cpsi - x*spsi) 
     bias = np.array([al_bias_binary(delta_eta = delta_eta[i], q=m2/m1, f=f) for i in range(len(psi))])
     Lambda_com = pmra*t_ast_yr*spsi + pmdec*t_ast_yr*cpsi + parallax*plx_factor # barycenter motion
@@ -274,7 +281,7 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
 
     Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
     Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
-
+    
     return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
 
 def get_a_mas(period, m1, m2, parallax):
@@ -813,7 +820,6 @@ def predict_astrometry_and_rvs_simultaneously(t_ast_yr, psi, plx_factor, t_rvs_y
     Y = np.sqrt(1-ecc**2)*np.sin(EE)
     
     x, y = B_pred*X + G_pred*Y, A_pred*X + F_pred*Y   
-    rho = np.sqrt(x**2 + y**2) 
     delta_eta = (-y*cpsi - x*spsi) 
     bias = np.array([al_bias_binary(delta_eta = delta_eta[i], q=m2/m1, f=f) for i in range(len(psi))])
     Lambda_pred = pmra*t_ast_yr*spsi + pmdec*t_ast_yr*cpsi + parallax*plx_factor + bias
@@ -842,16 +848,8 @@ def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean
     t = t[np.random.uniform(0, 1, len(t)) > 0.1]
     psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
     
-    if data_release == 'dr4':
-        t_ast_day = jds - 2457936.875
-    elif data_release == 'dr3':
-        t_ast_day = jds - 2457389.0
-    elif data_release == 'dr5':
-        t_ast_day = jds - 2458818.5
-    else: 
-        raise ValueError('invalid data_release!')
-    t_ast_yr = t_ast_day/365.25
-    
+    t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
+
     N_ccd_avg = 8
     epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
     
@@ -866,3 +864,126 @@ def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean
     Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
 
     return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
+
+ 
+def photocenter_orbit_2d(t_ast_yr, m1, m2, parallax, period, ecc, Tp, w, omega, inc, f, c_funcs):
+    '''
+    this function calculates the part of a binary's astrometric motion that is due to the orbit, without parallax and proper motion. Basically (BX + GY)*spsi, (AX + FY)*cpsi 
+    t_ast_yr: times relative to reference epoch
+    m1, m2: mass of primary and companion, in Msun
+    parallax: 1/distance; only used to calculate angular size of the orbit
+    period: orbital period in days
+    ecc: eccentricity 
+    Tp: periastron time in jd
+    w: little omega, in radians
+    omega: big Omega, in radians
+    inc: inclination, in radians
+    f: flux ratio, F2/F1
+    c_funcs: from read_in_C_functions()
+    '''
+    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
+    
+    a_mas = get_a_mas(period, m1, m2, parallax)
+    A_pred = a_mas*( np.cos(w)*np.cos(omega) - np.sin(w)*np.sin(omega)*np.cos(inc) )
+    B_pred = a_mas*( np.cos(w)*np.sin(omega) + np.sin(w)*np.cos(omega)*np.cos(inc) )
+    F_pred = -a_mas*( np.sin(w)*np.cos(omega) + np.cos(w)*np.sin(omega)*np.cos(inc) )
+    G_pred = -a_mas*( np.sin(w)*np.sin(omega) - np.cos(w)*np.cos(omega)*np.cos(inc) )
+    
+    X = np.cos(EE) - ecc
+    Y = np.sqrt(1-ecc**2)*np.sin(EE)
+    
+    x, y = B_pred*X + G_pred*Y, A_pred*X + F_pred*Y   
+    y_photocenter =  np.array([al_bias_binary(delta_eta = -y[i], q=m2/m1, f=f) for i in range(len(t_ast_yr))])
+    x_photocenter =  np.array([al_bias_binary(delta_eta = -x[i], q=m2/m1, f=f) for i in range(len(t_ast_yr))])
+    return x_photocenter, y_photocenter
+    
+def plot_2d_orbit_and_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, ecc, Tp, m1, m2, delta_ra, delta_dec, parallax, pmra, pmdec, f, w, omega, inc, data_release, c_funcs):
+    '''
+    This function plots the 2D projected orbit of a binary together with the epoch astrometry
+    '''
+    x_periastron, y_periastron = photocenter_orbit_2d(t_ast_yr = np.array([Tp/365.25]), m1 = m1, m2 = m2, parallax = parallax, period = period, ecc = ecc, Tp = Tp, w = w, omega = omega, inc = inc, f = f, c_funcs = c_funcs)
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    
+    ax.plot([0, x_periastron[0]], [0, y_periastron[0]], marker='.', ls='-', lw=0.5, color='0.5')
+    ax.plot(x_periastron, y_periastron, marker='s', color='0.5', mfc='0.5', zorder=10)
+
+    t_grid = np.linspace(np.min(t_ast_yr), np.min(t_ast_yr) + period/365.25, 1000)
+    x_curve, y_curve = photocenter_orbit_2d(t_ast_yr = t_grid, m1 = m1, m2 = m2, parallax = parallax, period = period, ecc = ecc, Tp = Tp, w = w, omega = omega, inc = inc, f = f, c_funcs = c_funcs)
+    ax.plot(x_curve, y_curve, ls='-', lw=1, color='b')
+    
+
+    x_epoch, y_epoch = photocenter_orbit_2d(t_ast_yr = t_ast_yr, m1 = m1, m2 = m2, parallax = parallax, period = period, ecc = ecc, Tp = Tp, w = w, omega = omega, inc = inc, f = f, c_funcs = c_funcs)
+    orbit_exact = x_epoch*np.sin(psi) + y_epoch*np.cos(psi)
+    Lambda_com = (delta_ra + pmra*t_ast_yr)*np.sin(psi) + (delta_dec + pmdec*t_ast_yr)*np.cos(psi) + parallax*plx_factor
+    residuals = ast_obs - (orbit_exact + Lambda_com)
+    residual_ra, residual_dec = np.sin(psi)*residuals, np.cos(psi)*residuals
+    
+    ax.plot(x_epoch + residual_ra, y_epoch + residual_dec, marker='o', color='k', ms=4, mfc='k', mec='k', ls='')
+                        
+    # plot epoch-level error-bars
+    for jj in range(len(residuals)):
+        x1 = x_epoch[jj] + np.sin(psi)[jj] * (residuals[jj] + ast_err[jj])
+        x2 = x_epoch[jj] + np.sin(psi)[jj] * (residuals[jj] - ast_err[jj])
+        y1 = y_epoch[jj] + np.cos(psi)[jj] * (residuals[jj] + ast_err[jj])
+        y2 = y_epoch[jj] + np.cos(psi)[jj] * (residuals[jj] - ast_err[jj])
+        ax.plot([x1, x2], [y1, y2], 'k-', lw=1)
+    ax.set_xlabel(r'$\rm \Delta\alpha\cos\delta \,\,[mas]$', fontsize=20)
+    ax.set_ylabel(r'$\rm \Delta\delta\,\,[mas]$', fontsize=20)
+    ax.invert_xaxis()
+    
+def get_Campbell_elements(A, B, F, G):
+    '''
+    Translate between Campbell elements and Thiele-Innes coefficients. Equations from the appendix of Halbwachs+2023. 
+    Equations for uncertainties can also be found there but are more complicated and not implemented here. 
+    A, B, F, G, are Thiele-Innes elements in mas. 
+    '''
+    u = 0.5 * (A**2 + B**2 + F**2 + G**2)
+    v = A * G - B * F
+    a0 = np.sqrt(u + np.sqrt(u**2 - v**2))
+    inc = np.arccos(v/(a0*a0))
+    
+    w_plus_Omega = np.arctan((B-F)/(A+G)) % np.pi
+    w_minus_Omega = np.arctan((B+F)/(G-A)) % np.pi
+    
+    w = ((w_plus_Omega + w_minus_Omega) / 2) % np.pi
+    Omega = ((w_plus_Omega - w_minus_Omega) / 2) % np.pi
+    return a0, inc, w, Omega
+    
+def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxratio, tol=1e-6, max_iter=1000):
+    '''
+    This function calculates M2 from M1 and the parameters of the astrometric orbit, assuming a flux ratio. 
+    It solves the transcendental equation iteratively using Newton's method.
+    M1: assumed mass of component 1 in Msun
+    a0_mas: photocenter semimajor axis in mas 
+    period: orbital period in days
+    parallax: 1/distance, in mas
+    fluxratio: F2/F1, with 0 corresponding to a dark companion
+    tol: tolerance for convergence
+    max_iter: maximum number of iterations. 
+    '''
+    
+    fm = (a0_mas/parallax)**3/(period/365.25)**2
+    A = fluxratio / (1 + fluxratio)
+
+    def f(x):
+        return (M1 + x) * (x / (M1 + x) - A)**3 - fm
+    def df_dx(x):
+        term1 = (x / (M1 + x) - A)**3
+        term2 = 3 * (x / (M1 + x) - A)**2 * (1 / (M1 + x) - x / (M1 + x)**2)
+        return term1 + (M1 + x) * term2
+
+    x = M1 / 2  # Start with half the mass of the primary as an initial guess
+    for _ in range(max_iter):
+        f_x, df_x = f(x), df_dx(x)
+        if np.abs(f_x) < tol:
+            return x
+        if df_x == 0:
+            raise ValueError("Derivative is zero. Newton's method fails.")
+        x -= f_x / df_x
+
+    # If no solution is found within max_iter iterations
+    raise ValueError("Solution did not converge")
+    
+    
