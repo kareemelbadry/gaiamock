@@ -986,4 +986,61 @@ def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxrati
     # If no solution is found within max_iter iterations
     raise ValueError("Solution did not converge")
     
+def get_astrometric_likelihoods_worker(t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples):
+    '''
+    call this function through multiprocessing
+    '''
+    c_funcs = read_in_C_functions()
+    
+    P, ecc, phi_p = samples
+    t_ast_yr_double = t_ast_yr.astype(np.double)
+    psi_double = psi.astype(np.double)
+    plx_factor_double = plx_factor.astype(np.double)
+    ast_obs_double = ast_obs.astype(np.double)
+    ast_err_double = ast_err.astype(np.double)
+    P_double = P.astype(np.double)
+    phi_p_double = phi_p.astype(np.double)
+    ecc_double = ecc.astype(np.double)
+
+    lnL_array = np.empty(len(P), dtype = np.double)
+        
+    c_funcs.get_likelihoods_astrometry(ctypes.c_int(len(t_ast_yr)), ctypes.c_int(len(P)), ctypes.c_void_p(t_ast_yr_double.ctypes.data),ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(P_double.ctypes.data), ctypes.c_void_p(phi_p_double.ctypes.data), ctypes.c_void_p(ecc_double.ctypes.data),  ctypes.c_void_p(lnL_array.ctypes.data))
+    return lnL_array
+
+
+def generate_prior_samples(N_samps, P_range = [10, 10000]):
+    '''
+    This function produces samples of (P, ecc, Tp), for which we can calculate likelihoods for rejection sampling. 
+    uniform in frequency (1/P)
+    uniform in ecc
+    uniform in phi0 = 2*pi*Tp/P
+    '''
+    P = 1/np.random.uniform(1/P_range[0], 1/P_range[1], N_samps)
+    ecc = np.random.uniform(0, 1, N_samps)
+    phi0 = np.random.uniform(0, 2*np.pi, N_samps)
+    Tp = phi0*P/(2*np.pi)
+    return (P, ecc, Tp)
+    
+
+def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples):
+    '''
+    this function evaluates the likelihood for a set of astrometric measurements characterized by 
+        (t_ast_yr, psi, plx_factor, ast_obs, ast_err) on a set of sample (P, e, phi_0)
+    
+    on my laptop, this evaluates 10^7 likelihood samples in about 45 seconds 
+    returns L = np.exp(lnL)
+    '''
+    from joblib import Parallel, delayed 
+    edges = np.linspace(0, len(samples[0]), joblib.cpu_count()+1).astype(int)
+    
+    def run_this_j(j):
+        these_samples = [samples[i][edges[j]:edges[j+1]] for i in range(3)]
+        return get_astrometric_likelihoods_worker(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, samples = these_samples)
+        
+    res = Parallel(n_jobs=joblib.cpu_count())(delayed(run_this_j)(x) for x in range(joblib.cpu_count()))
+    L = np.exp(np.concatenate(res))
+    return L
+
+    #r = np.random.uniform(0, np.max(L), len(L))
+    #keep = L > r
     

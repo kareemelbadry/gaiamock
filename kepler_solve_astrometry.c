@@ -577,3 +577,96 @@ void run_astfit(double* t_ast_yr, double* psi, double *plx_factor, double* ast_o
     free(xbest);
 }
 
+/* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc. 
+*/
+void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array){
+    double xtol = 1e-10;
+    double Ei;
+    double Mi;
+    double X[n_obs];
+    double Y[n_obs]; 
+    double ivar[n_obs];
+    
+    gsl_matrix *M = gsl_matrix_calloc(n_obs, 9);
+    gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
+    
+    gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs); // Allocate and initialize to zero
+    gsl_matrix *C = gsl_matrix_calloc(n_obs, n_obs); // Allocate and initialize to zero
+
+    gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
+    gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
+    gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
+    gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
+    gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
+    
+
+    // Compute ivar and fill Cinv and C
+    for (int j = 0; j < n_obs; j++) {
+        ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
+        gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
+        gsl_matrix_set(C, j, j, 1.0 / ivar[j]); // Set diagonal elements of C
+    }    
+    
+    for(int i = 0; i < n_samp; i++) {
+        for(int j = 0; j < n_obs; j++){
+            Mi = 2*PI*t_ast_yr[j]*365.25/P[i] - phi_p[i];
+            Ei = solve_Kepler_equation(Mi, ecc[i], xtol);
+            
+            X[j] = cos(Ei) - ecc[i];
+            Y[j] = sqrt(1-ecc[i]*ecc[i])*sin(Ei);
+        }
+        
+        // Fill the matrix M 
+        for (int j = 0; j < n_obs; j++) {
+            gsl_matrix_set(M, j, 0, sin(psi[j]) );
+            gsl_matrix_set(M, j, 1, t_ast_yr[j] * sin(psi[j]) );
+            gsl_matrix_set(M, j, 2, cos(psi[j]) );
+            gsl_matrix_set(M, j, 3, t_ast_yr[j] * cos(psi[j]));
+            gsl_matrix_set(M, j, 4, plx_factor[j]);
+            gsl_matrix_set(M, j, 5, X[j] * sin(psi[j]) );
+            gsl_matrix_set(M, j, 6, Y[j] * sin(psi[j]) );
+            gsl_matrix_set(M, j, 7, X[j] * cos(psi[j]));
+            gsl_matrix_set(M, j, 8, Y[j] * cos(psi[j]));
+        }
+        
+        gsl_matrix_transpose_memcpy(Mt, M);
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, Mt, Cinv, 0.0, temp);
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, temp, M, 0.0, MtCinvM);
+        
+        // Compute Mt * Cinv * ast_obs
+        gsl_vector *Cinv_ast_obs = gsl_vector_alloc(n_obs); 
+        gsl_vector_view ast_obs_view = gsl_vector_view_array(ast_obs, n_obs); 
+        
+        // Perform the multiplication Cinv * ast_obs; multiply Mt and the result of the first multiplication
+        gsl_blas_dgemv(CblasNoTrans, 1.0, Cinv, &ast_obs_view.vector, 0.0, Cinv_ast_obs);
+        gsl_blas_dgemv(CblasNoTrans, 1.0, Mt, Cinv_ast_obs, 0.0, MtCinvY);
+
+        // Solve for mu
+        gsl_linalg_HH_solve(MtCinvM, MtCinvY, mu);
+
+        // Compute predicted values Lambda_pred = M * mu
+        gsl_blas_dgemv(CblasNoTrans, 1.0, M, mu, 0.0, Lambda_pred);
+        
+
+        // Compute log-likelihood
+        double lnL = 0.0; // Log likelihood
+        for (int j = 0; j < n_obs; j++) {
+            double pred = gsl_vector_get(Lambda_pred, j);
+            double obs = ast_obs[j];
+            double err = ast_err[j];
+            lnL -= 0.5 * ((pred - obs) * (pred - obs)) / (err * err);
+        }
+
+        lnL_array[i] = lnL;
+    }
+    // Cleanup
+    gsl_matrix_free(M);
+    gsl_matrix_free(Mt);
+    gsl_matrix_free(Cinv);
+    gsl_matrix_free(C);
+    gsl_matrix_free(MtCinvM);
+    gsl_vector_free(MtCinvY);
+    gsl_vector_free(mu);
+    gsl_vector_free(Lambda_pred);
+    gsl_matrix_free(temp);
+}
