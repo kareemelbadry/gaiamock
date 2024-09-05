@@ -514,32 +514,15 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     
     return uncertainties, a0, sigma_a0, inc_deg
 
-def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False):
+
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False):
     '''
-    this function generates the mock 1D astrometry for a binary and then fits it with a cascade of astrometric models.  
-    ra, dec: coordinates, in degrees
-    parallax: true parallax in mas
-    pmra, pmdec, true proper motions in mas/yr
-    m1: mass of star 1 in Msun
-    m2: mass of star 2 in Msun
-    period: orbital period in days
-    Tp: periastron time in days
-    ecc: eccentricity
-    omega: "big Omega" in radians
-    inc_deg: inclination in degrees, defined so that 0 or 180 is face-on, and 90 is edge-on. 
-    w: "little omega" in radians
-    epoch_err_mas: this is the uncertainty in AL displacement per FOV transit (not per CCD)
-    f: flux ratio, F2/F1, in the G-band. 
-    data_release: 'dr3', 'dr4', or 'dr5'
+    this function takes 1D astrometry and fits it with a cascade of astrometric models.  
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of astrometric measurements and related metadata
     c_funcs: from read_in_C_functions()
     verbose: whether to print results of fitting. 
     if show_residuals, plot the residuals of the best-fit 5-parameter solution and the best-fit orbital solution. This will only happen if an orbital solution is actually calculated (i.e., we get to that stage in the cascade.)
-    '''
-    if c_funcs is None:
-        c_funcs = read_in_C_functions()
-
-    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs)
-    
+    '''    
     Nret = 22 # number of arguments to return 
     N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
     if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
@@ -573,8 +556,7 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
         if show_residuals:
             plot_residuals_9par(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, theta_array = mu, c_funcs = c_funcs)
         return res
-        
-    
+            
     F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
     plx_over_err7 = mu[-1]/sigma_mu[-1]
     if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05):
@@ -631,6 +613,42 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
     # lots of stuff that can be useful to return
     return_array = [plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, period, sig_period, phi_p, sig_phi_p, ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, len(t_ast_yr), F2]
     return return_array
+
+
+def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False):
+    '''
+    this function generates the mock 1D astrometry for a binary and then fits it with a cascade of astrometric models.  
+    ra, dec: coordinates, in degrees
+    parallax: true parallax in mas
+    pmra, pmdec, true proper motions in mas/yr
+    m1: mass of star 1 in Msun
+    m2: mass of star 2 in Msun
+    period: orbital period in days
+    Tp: periastron time in days
+    ecc: eccentricity
+    omega: "big Omega" in radians
+    inc_deg: inclination in degrees, defined so that 0 or 180 is face-on, and 90 is edge-on. 
+    w: "little omega" in radians
+    epoch_err_mas: this is the uncertainty in AL displacement per FOV transit (not per CCD)
+    f: flux ratio, F2/F1, in the G-band. 
+    data_release: 'dr3', 'dr4', or 'dr5'
+    c_funcs: from read_in_C_functions()
+    verbose: whether to print results of fitting. 
+    if show_residuals, plot the residuals of the best-fit 5-parameter solution and the best-fit orbital solution. This will only happen if an orbital solution is actually calculated (i.e., we get to that stage in the cascade.)
+    '''
+    if c_funcs is None:
+        c_funcs = read_in_C_functions()
+
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs)
+    
+    Nret = 22 # number of arguments to return 
+    N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
+    if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
+        if verbose:
+            print('not enough visibility periods!')
+        return Nret*[0]
+        
+    return fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals) 
 
 def xyz_to_galactic(x, y, z):
     '''
@@ -1040,7 +1058,5 @@ def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, sam
     res = Parallel(n_jobs=joblib.cpu_count())(delayed(run_this_j)(x) for x in range(joblib.cpu_count()))
     L = np.exp(np.concatenate(res))
     return L
-
-    #r = np.random.uniform(0, np.max(L), len(L))
-    #keep = L > r
+ 
     
