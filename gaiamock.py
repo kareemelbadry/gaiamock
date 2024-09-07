@@ -170,8 +170,8 @@ def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
     
     cov_matrix = np.linalg.inv(M.T @ Cinv @ M)
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
-    p1, p2, sig1, sig2 = mu[3], mu[6], sigma_mu[3], sigma_mu[6]
-    rho12 = cov_matrix[3][6]/(sig1*sig2)
+    p1, p2, sig1, sig2 = mu[3], mu[7], sigma_mu[3], sigma_mu[7]
+    rho12 = cov_matrix[3][7]/(sig1*sig2)
     s = 1/(sig1*sig2)*np.sqrt((p1**2*sig2**2 + p2**2*sig1**2 - 2*p1*p2*rho12*sig1*sig2)/(1-rho12**2))
     return F2, s, mu, sigma_mu
 
@@ -542,28 +542,36 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
             print('UWE < 1.4: returning only 5-parameter solution.')
         return res
     
+    # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
     F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
     plx_over_err9 = mu[-1]/sigma_mu[-1]
     if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05):
         res =  Nret*[-9]  # set most return arguments to -9, but save a few parameters for convenience 
-        res[1] = s_9par
-        res[2] = mu[-1]
-        res[3] = sigma_mu[-1]
-        
+        res[1] = s_9par 
+        res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
+        res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
+        res[6], res[7] = mu[3], sigma_mu[3] # pmra_ddot
+        res[8], res[9] = mu[6], sigma_mu[6] # pmdec_dot
+        res[10], res[11] = mu[7], sigma_mu[7] # pmdec_ddot
+        res[12] = ruwe 
+
         if verbose:
             print('9 parameter solution accepted! Not trying anything else.')
             print('s9: %.1f, plx_over_err9: %.1f, F2_9: %.1f' % (s_9par, plx_over_err9, F2_9par))
         if show_residuals:
             plot_residuals_9par(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, theta_array = mu, c_funcs = c_funcs)
         return res
-            
+    
+    # mu is ra, pmra, pmra_dot, dec, pmdec, pmdec_dot, plx
     F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
     plx_over_err7 = mu[-1]/sigma_mu[-1]
     if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05):
         res =  Nret*[-7]
         res[1] = s_7par
-        res[2] = mu[-1]
-        res[3] = sigma_mu[-1]
+        res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
+        res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
+        res[6], res[7] = mu[5], sigma_mu[5] # pmra_dot
+        res[8] = ruwe
         
         if verbose:
             print('7 parameter solution accepted! Not trying anything else.')
