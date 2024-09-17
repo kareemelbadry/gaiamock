@@ -120,7 +120,7 @@ def check_ruwe(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
     Lambda_pred = np.dot(M, mu)
     resids = ast_obs - Lambda_pred
     chi2 = np.sum(resids**2/ast_err**2)
-    ruwe = np.sqrt(chi2/(len(psi) - 5))
+    ruwe = np.sqrt(chi2/(len(ast_obs) - 5))
     
     nu = len(ast_obs) - 5
     cc = np.sqrt(chi2/(nu*(1-2/(9*nu))**3 )) # uncertainy inflation factor
@@ -150,7 +150,7 @@ def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
     p1, p2, sig1, sig2 = mu[2], mu[5], sigma_mu[2], sigma_mu[5]
     rho12 = cov_matrix[2][5]/(sig1*sig2)
-    s = 1/(sig1*sig2)*np.sqrt((p1**2*sig2**2 + p2**2*sig1**2 -2*p1*p2*rho12*sig1*sig2)/(1-rho12**2))
+    s = 1/(sig1*sig2)*np.sqrt((p1**2*sig2**2 + p2**2*sig1**2 - 2*p1*p2*rho12*sig1*sig2)/(1-rho12**2))
     return F2, s, mu, sigma_mu
     
 def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
@@ -523,7 +523,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     verbose: whether to print results of fitting. 
     if show_residuals, plot the residuals of the best-fit 5-parameter solution and the best-fit orbital solution. This will only happen if an orbital solution is actually calculated (i.e., we get to that stage in the cascade.)
     '''    
-    Nret = 22 # number of arguments to return 
+    Nret = 23 # number of arguments to return 
     N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
     if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
         if verbose:
@@ -570,7 +570,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         res[1] = s_7par
         res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
         res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
-        res[6], res[7] = mu[5], sigma_mu[5] # pmra_dot
+        res[6], res[7] = mu[5], sigma_mu[5] # pmdec_dot
         res[8] = ruwe
         
         if verbose:
@@ -619,7 +619,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
             print('eccentricity error is too high to pass DR3 cuts! ecc_error: %.2f' % sig_ecc)
     
     # lots of stuff that can be useful to return
-    return_array = [plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, period, sig_period, phi_p, sig_phi_p, ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, len(t_ast_yr), F2]
+    return_array = [plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, period, sig_period, phi_p, sig_phi_p, ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, len(t_ast_yr), F2, ruwe]
     return return_array
 
 
@@ -649,7 +649,7 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
 
     t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs)
     
-    Nret = 22 # number of arguments to return 
+    Nret = 23 # number of arguments to return 
     N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
     if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
         if verbose:
