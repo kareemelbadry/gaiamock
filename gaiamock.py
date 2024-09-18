@@ -108,22 +108,42 @@ def solve_kepler_eqn_on_array(M, ecc, c_funcs, xtol = 1e-10):
 
     return results_array
     
-
+def predict_reduced_chi2_unbinned_data(chi2_red_binned, n_param, N_points, Nbin=8):
+    '''
+    this function corrects for the fact that reduced chi2 for a poor fit increases when the data is binned. 
+    chi2_red_binned: the reduced chi2, i.e. chi^2/(N_data - n_param), calculated from the binned data
+    n_param: the number of free parameters in the model
+    N_points: the number of points after binning. The number before binning is N_points*Nbin
+    Nbin: how many observations are combined to make one data point. For our purposes, the number of CCDs 
+    '''
+    return (Nbin - 1 + Nbin*(N_points - n_param)/(N_points*Nbin - n_param)*chi2_red_binned )/Nbin
+    
+def predict_F2_unbinned_data(chi2_red_binned, n_param, N_points, Nbin=8):
+    '''
+    
+    '''
+    chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = n_param, N_points = N_points, Nbin=Nbin)
+    nu_unbinned = N_points*Nbin - n_param # unbinned
+    return np.sqrt(9*nu_unbinned/2)*(chi2_red_unbinned**(1/3) + 2/(9*nu_unbinned) -1  )
 
 def check_ruwe(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
     '''
     This function takes a set of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err) and fits a 5-parameter solution. It inflates the uncertainties according to the goodness of fit and returns the 5-parameter UWE, best-fit parameters, and uncertainties. 
+    When calculating ruwe and parallax uncertainty inflation factors, we need to account for the fact that we binned
+        (averaging 8 ccds per FOV transit), because binning does not conserve reduced chi^2. 
     '''
     Cinv = np.diag(1/ast_err**2)    
     M = np.vstack([np.sin(psi), t_ast_yr*np.sin(psi), np.cos(psi), t_ast_yr*np.cos(psi), plx_factor]).T 
     mu = np.linalg.solve(M.T @ Cinv @ M, M.T @ Cinv @ ast_obs)  
     Lambda_pred = np.dot(M, mu)
     resids = ast_obs - Lambda_pred
-    chi2 = np.sum(resids**2/ast_err**2)
-    ruwe = np.sqrt(chi2/(len(ast_obs) - 5))
+    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 5, len(ast_obs)*8 - 5  
+
     
-    nu = len(ast_obs) - 5
-    cc = np.sqrt(chi2/(nu*(1-2/(9*nu))**3 )) # uncertainy inflation factor
+    chi2_red_binned = np.sum(resids**2/ast_err**2)/nu
+    chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 5, N_points = Nobs, Nbin=8)
+    ruwe = np.sqrt(chi2_red_unbinned)
+    cc = np.sqrt(chi2_red_unbinned/((1-2/(9*nu_unbinned))**3 ))
     
     cov_matrix = np.linalg.inv(M.T @ Cinv @ M)
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
@@ -140,19 +160,20 @@ def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
     
     Lambda_pred = np.dot(M, mu)
     resids = ast_obs - Lambda_pred
-    chi2 = np.sum(resids**2/ast_err**2)
-    nu = len(ast_obs) - 7 
-    F2 = np.sqrt(9*nu/2)*( (chi2/nu)**(1/3) + 2/(9*nu) -1 )
-    cc = ((F2*np.sqrt(2/(9*nu))+1 - 2/(9*nu))/(1-2/(9*nu)) )**(3/2) 
+    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 7, len(ast_obs)*8 - 7
     
-    
+    chi2_red_binned = np.sum(resids**2/ast_err**2)/nu
+    chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 7, N_points = Nobs, Nbin=8)
+
+    F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 7, N_points = Nobs, Nbin=8)
+    cc = np.sqrt(chi2_red_unbinned/((1-2/(9*nu_unbinned))**3 ))
     cov_matrix = np.linalg.inv(M.T @ Cinv @ M)
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
     p1, p2, sig1, sig2 = mu[2], mu[5], sigma_mu[2], sigma_mu[5]
     rho12 = cov_matrix[2][5]/(sig1*sig2)
     s = 1/(sig1*sig2)*np.sqrt((p1**2*sig2**2 + p2**2*sig1**2 - 2*p1*p2*rho12*sig1*sig2)/(1-rho12**2))
     return F2, s, mu, sigma_mu
-    
+ 
 def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
     '''
     This function takes a set of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err) and fits a 9-parameter acceleration solution. It inflates the uncertainties according to the goodness of fit and returns the best-fit parameters and uncertainties and F2 and significance associated with the solution. 
@@ -163,11 +184,13 @@ def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err):
     
     Lambda_pred = np.dot(M, mu)
     resids = ast_obs - Lambda_pred
-    chi2 = np.sum(resids**2/ast_err**2)
-    nu = len(ast_obs) - 9
-    F2 = np.sqrt(9*nu/2)*( (chi2/nu)**(1/3) + 2/(9*nu) -1 )
-    cc = ((F2*np.sqrt(2/(9*nu))+1 - 2/(9*nu))/(1-2/(9*nu)) )**(3/2) 
     
+    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 9, len(ast_obs)*8 - 9
+    chi2_red_binned = np.sum(resids**2/ast_err**2)/nu
+    chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 9, N_points = Nobs, Nbin=8)
+    F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 9, N_points = Nobs, Nbin=8)
+    cc = np.sqrt(chi2_red_unbinned/((1-2/(9*nu_unbinned))**3 ))
+ 
     cov_matrix = np.linalg.inv(M.T @ Cinv @ M)
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
     p1, p2, sig1, sig2 = mu[3], mu[7], sigma_mu[3], sigma_mu[7]
@@ -396,9 +419,7 @@ def plot_residuals_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array
     Lambda_pred = np.dot(M, theta_array)
     resids = ast_obs - Lambda_pred
     chi2 = np.sum(resids**2/ast_err**2)
-    nu = len(ast_obs) - 9
-    F2 = np.sqrt(9*nu/2)*( (chi2/nu)**(1/3) + 2/(9*nu) -1 )    
-    
+ 
     print('9 parameter chi2: %.2f' % chi2 )
     ax[1].errorbar(t_ast_yr, ast_obs - Lambda_pred, yerr=ast_err, fmt='k.')
     ax[1].set_xlabel('time (years)', fontsize=20)
@@ -433,9 +454,7 @@ def plot_residuals_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array
     Lambda_pred = np.dot(M, theta_array)
     resids = ast_obs - Lambda_pred
     chi2 = np.sum(resids**2/ast_err**2)
-    nu = len(ast_obs) - 7 
-    F2 = np.sqrt(9*nu/2)*( (chi2/nu)**(1/3) + 2/(9*nu) -1 )   
-    
+ 
     print('7-parameter chi2: %.2f' % chi2 )
     ax[1].errorbar(t_ast_yr, ast_obs - Lambda_pred, yerr=ast_err, fmt='k.')
     ax[1].set_xlabel('time (years)', fontsize=20)
@@ -477,10 +496,10 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     cov_x = np.linalg.inv(np.dot(J.T, J))  
 
     if not np.sum(~np.isfinite(cov_x)):
-        chi2 = np.sum(resid_func(p0)**2)
-        nu = len(ast_obs) - 12
-        cc = np.sqrt(chi2/(nu*(1-2/(9*nu))**3 )) # uncertainy inflation factor
-        
+        nu, Nobs, nu_unbinned = len(ast_obs) - 12, len(ast_obs), len(ast_obs)*8 - 12  
+        chi2_red_binned = np.sum(resid_func(p0)**2)/nu
+        chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
+        cc = np.sqrt(chi2_red_unbinned/((1-2/(9*nu_unbinned))**3 ))
         uncertainties = cc*np.sqrt(np.diag(cov_x))
 
         ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G = p0
@@ -592,7 +611,14 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     # get some uncertainties 
     errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs)
     sig_ra,sig_dec,sig_parallax,sig_pmra,sig_pmdec,sig_period,sig_ecc,sig_phi_p,sig_A,sig_B, sig_F,sig_G = errors
-    F2 = np.sqrt(9*(len(ast_obs) - 12)/2)*( (chi2/(len(ast_obs) - 12))**(1/3) + 2/(9*(len(ast_obs) - 12)) -1 )
+    
+    
+    
+    
+    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
+    chi2_red_binned = chi2/nu
+    chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
+    F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
     a0_over_err, parallax_over_error = a0_mas/sigma_a0_mas, plx/sig_parallax
     
     if show_residuals:
