@@ -262,7 +262,7 @@ def rescale_times_astrometry(jd, data_release):
     t_ast_yr = t_ast_day/365.25
     return t_ast_yr
     
-def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs):
+def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs, do_blending_noise = False):
     '''
     this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia. 
     ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
@@ -318,9 +318,10 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
     
     # extra noise for partially resolved sources
-    blending_noise = 0.5*np.random.randn(len(psi))
-    blending_noise[np.abs(delta_eta) < 45] = 0 # 0 if \Delta \eta < resolution/2
-    Lambda_pred += blending_noise
+    if do_blending_noise:
+        blending_noise = 0.5*np.random.randn(len(psi))
+        blending_noise[np.abs(delta_eta) < 45] = 0 # 0 if \Delta \eta < resolution/2
+        Lambda_pred += blending_noise
     
     return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
 
@@ -520,7 +521,6 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
             cc = np.sqrt(chi2_red_unbinned/((1 - 2/(9*nu_unbinned))**3 ))
         else:
             cc = np.sqrt(chi2_red_binned/((1 - 2/(9*nu))**3 ))
-        print(chi2_red_binned, chi2_red_unbinned)
         uncertainties = cc*np.sqrt(np.diag(cov_x))
 
         ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G = p0
@@ -705,7 +705,19 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
             print('not enough visibility periods!')
         return Nret*[0]
         
-    return fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals) 
+    res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals) 
+    
+    if (period > 1e4) and (res[-2] < 25) & (res[-6]/res[-5] > 5): # blended, so rerun...
+         t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, do_blending_noise = True)
+        Nret = 23 # number of arguments to return 
+        N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
+        if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
+            if verbose:
+                print('not enough visibility periods!')
+            return Nret*[0]
+        res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals) 
+
+    return res
 
 def xyz_to_galactic(x, y, z):
     '''
