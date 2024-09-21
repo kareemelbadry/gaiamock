@@ -707,8 +707,9 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
         
     res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals) 
     
-    if (period > 1e4) and (res[-2] < 25) & (res[-6]/res[-5] > 5): # blended, so rerun...
-         t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, do_blending_noise = True)
+    # potentially blended, so rerun 
+    if (period > 1e4) and (res[-2] < 25) & (res[-6]/res[-5] > 5): 
+        t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, do_blending_noise = True)
         Nret = 23 # number of arguments to return 
         N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
         if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
