@@ -839,7 +839,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     from joblib import Parallel, delayed
     res = Parallel(n_jobs=joblib.cpu_count())(delayed(search_mock_binary_worker)(x) for x in range(N_realizations))
 
-    plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, fit_period, sig_period, phi_p, sig_phi_p, fit_ecc, sig_ecc, fit_inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, N_obs, F2 = np.array(res).T
+    plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, fit_period, sig_period, phi_p, sig_phi_p, fit_ecc, sig_ecc, fit_inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, N_obs, F2, ruwe = np.array(res).T
 
     plx_over_err, a0_over_err = plx/sig_parallax, a0_mas/sigma_a0_mas
     
