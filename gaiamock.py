@@ -176,8 +176,10 @@ def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
     
     cov_matrix = np.linalg.inv(M.T @ Cinv @ M)
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
+    cov25 = cov_matrix[2][5]*cc**2
+    
     p1, p2, sig1, sig2 = mu[2], mu[5], sigma_mu[2], sigma_mu[5]
-    rho12 = cov_matrix[2][5]/(sig1*sig2)
+    rho12 = cov25/(sig1*sig2)
     s = 1/(sig1*sig2)*np.sqrt((p1**2*sig2**2 + p2**2*sig1**2 - 2*p1*p2*rho12*sig1*sig2)/(1-rho12**2))
     return F2, s, mu, sigma_mu
  
@@ -205,8 +207,10 @@ def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=True):
  
     cov_matrix = np.linalg.inv(M.T @ Cinv @ M)
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
+    cov37 = cov_matrix[3][7]*cc**2
+    
     p1, p2, sig1, sig2 = mu[3], mu[7], sigma_mu[3], sigma_mu[7]
-    rho12 = cov_matrix[3][7]/(sig1*sig2)
+    rho12 = cov37/(sig1*sig2)
     s = 1/(sig1*sig2)*np.sqrt((p1**2*sig2**2 + p2**2*sig1**2 - 2*p1*p2*rho12*sig1*sig2)/(1-rho12**2))
     return F2, s, mu, sigma_mu
 
@@ -594,6 +598,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         res[8], res[9] = mu[6], sigma_mu[6] # pmdec_dot
         res[10], res[11] = mu[7], sigma_mu[7] # pmdec_ddot
         res[12] = ruwe 
+        res[13] = F2_9par 
 
         if verbose:
             print('9 parameter solution accepted! Not trying anything else.')
@@ -612,6 +617,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
         res[6], res[7] = mu[5], sigma_mu[5] # pmdec_dot
         res[8] = ruwe
+        res[9] = F2_7par
         
         if verbose:
             print('7 parameter solution accepted! Not trying anything else.')
