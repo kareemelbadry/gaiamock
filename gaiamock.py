@@ -853,12 +853,12 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     passed_cuts = (a0_over_err[ok] > 5) & (plx_over_err[ok] > 20000/fit_period[ok]) & (a0_over_err[ok] > 158/np.sqrt(fit_period[ok])) & (sig_ecc[ok] < 0.079*np.log(fit_period[ok])-0.244) 
     accepted[ok] = passed_cuts
 
-    print('%d out of %d solutions had insufficient visibility periods' % (np.sum(fit_period == 0), N_realizations) )    
-    print('%d out of %d solutions had ruwe < 1.4' % (np.sum(fit_period == -1), N_realizations) )
-    print('%d out of %d solutions got 9-parameter solutions' % (np.sum(fit_period == -9), N_realizations) )
-    print('%d out of %d solutions got 7-parameter solutions' % (np.sum(fit_period == -7), N_realizations) )
+    print('%d out of %d solutions had insufficient visibility periods' % (np.sum(plx == 0), N_realizations) )    
+    print('%d out of %d solutions had ruwe < 1.4' % (np.sum(plx == -1), N_realizations) )
+    print('%d out of %d solutions got 9-parameter solutions' % (np.sum(plx == -9), N_realizations) )
+    print('%d out of %d solutions got 7-parameter solutions' % (np.sum(plx == -7), N_realizations) )
     print('%d out of %d solutions passed all cuts and got an orbital solution!' % (np.sum(accepted), N_realizations) )
-    print('%d out of %d solutions got to orbital solutions but failed at least one cut. ' % (np.sum(~accepted & (fit_period > 0)), N_realizations) )
+    print('%d out of %d solutions got to orbital solutions but failed at least one cut. ' % (np.sum(~accepted & (plx > 0)), N_realizations) )
         
     return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted
 
