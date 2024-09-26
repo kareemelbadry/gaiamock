@@ -559,7 +559,7 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     return uncertainties, a0, sigma_a0, inc_deg
 
 
-def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True):
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False):
     '''
     this function takes 1D astrometry and fits it with a cascade of astrometric models.  
     t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of astrometric measurements and related metadata
@@ -576,7 +576,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     
     # check 5-parameter solution 
     ruwe, mu, sigma_mu = check_ruwe(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, binned=binned)
-    if ruwe < 1.4:
+    if ruwe < ruwe_min:
         res =  Nret*[-1] # set most return arguments to -1, but save a few parameters for convenience 
         res[1] = ruwe 
         res[2] = mu[-1]
@@ -589,7 +589,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
     F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=binned)
     plx_over_err9 = mu[-1]/sigma_mu[-1]
-    if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05):
+    if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05) and (not skip_acceleration):
         res =  Nret*[-9]  # set most return arguments to -9, but save a few parameters for convenience 
         res[1] = s_9par 
         res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
@@ -610,7 +610,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     # mu is ra, pmra, pmra_dot, dec, pmdec, pmdec_dot, plx
     F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=binned)
     plx_over_err7 = mu[-1]/sigma_mu[-1]
-    if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05):
+    if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05) and (not skip_acceleration):
         res =  Nret*[-7]
         res[1] = s_7par
         res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
@@ -678,7 +678,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     return return_array
 
 
-def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False):
+def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False, ruwe_min = 1.4, skip_acceleration=False):
     '''
     this function generates the mock 1D astrometry for a binary and then fits it with a cascade of astrometric models.  
     ra, dec: coordinates, in degrees
@@ -711,7 +711,7 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
             print('not enough visibility periods!')
         return Nret*[0]
         
-    res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals) 
+    res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min,skip_acceleration=skip_acceleration ) 
     
     # potentially blended, so rerun 
     if (period > 1e4) and (res[-2] < 25) & (res[-6]/res[-5] > 5): 
@@ -722,7 +722,7 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
             if verbose:
                 print('not enough visibility periods!')
             return Nret*[0]
-        res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals) 
+        res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration) 
 
     return res
 
@@ -814,7 +814,7 @@ def generate_coordinates_at_a_given_distance_exponential_disk(d_min, d_max, N_st
     ra, dec, d_pc = ra[:N_stars], dec[:N_stars], d_pc[:N_stars]
     return ra, dec, d_pc, x[ok][:N_stars], y[ok][:N_stars], z[ok][:N_stars]
     
-def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True):
+def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True, ruwe_min=1.4, skip_acceleration = False):
     '''
     this function generates N_realizations realizations of a binary within a given distance range, for a fixed Porb, absolute magnitude, flux ratio, and eccentricity. Sky positions and orientations will be different for each realization. It generates epoch astrometry for each realization, and then fits that astrometry with the standard astrometric cascade. Finally, it reports what fraction of all realizations resulted in an orbital solution that passes all the DR3 cuts.  
     '''
@@ -839,7 +839,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
 
     
     def search_mock_binary_worker(i):
-        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False)        
+        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration)        
         return result
     
     from joblib import Parallel, delayed
