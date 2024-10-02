@@ -329,6 +329,63 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     
     return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
 
+
+def predict_astrometry_binary_in_terms_of_a0(ra, dec, parallax, pmra, pmdec, period, Tp, ecc, omega, inc, w, a0_mas, phot_g_mean_mag, data_release, c_funcs):
+    '''
+    this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia, in terms of a0 rather than m1 and m2 and f. It is only valid in the limit where the separation of the two stars is less than about 45 mas, so that the photocenter approximation works well. 
+    
+    ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
+    parallax (mas): the true parallax (i.e., 1/d)
+    pmra, pmdec: true proper motions in mas/yr
+    a0_mas: the photocenter semimajor axis 
+    period: orbital period in days
+    Tp: periastron time in days
+    ecc: eccentricity
+    omega: "big Omega" in radians
+    inc: inclination in radians, defined so that 0 or pi is face-on, and pi/2 is edge-on. 
+    w: "little omega" in radians
+    phot_g_mean_mag: G-band magnitude 
+    data_release: 'dr3', 'dr4', or 'dr5'
+    c_funcs: from read_in_C_functions()
+    '''
+    
+    t = get_gost_one_position(ra, dec, data_release=data_release)
+    
+    # reject a random 10%
+    t = t[np.random.uniform(0, 1, len(t)) > 0.1]
+    psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
+    t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
+    
+    N_ccd_avg = 8
+    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+    
+    if phot_g_mean_mag < 13:
+        extra_noise = np.random.uniform(0, 0.04)
+    else: 
+        extra_noise = 0
+
+    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
+ 
+    A_pred = a0_mas*( np.cos(w)*np.cos(omega) - np.sin(w)*np.sin(omega)*np.cos(inc) )
+    B_pred = a0_mas*( np.cos(w)*np.sin(omega) + np.sin(w)*np.cos(omega)*np.cos(inc) )
+    F_pred = -a0_mas*( np.sin(w)*np.cos(omega) + np.cos(w)*np.sin(omega)*np.cos(inc) )
+    G_pred = -a0_mas*( np.sin(w)*np.sin(omega) - np.cos(w)*np.cos(omega)*np.cos(inc) )
+    
+    X = np.cos(EE) - ecc
+    Y = np.sqrt(1-ecc**2)*np.sin(EE)
+    
+    x, y = B_pred*X + G_pred*Y, A_pred*X + F_pred*Y   
+    delta_eta = (y*np.cos(psi) + x*np.sin(psi)) 
+    
+    Lambda_com = pmra*t_ast_yr*np.sin(psi) + pmdec*t_ast_yr*np.cos(psi) + parallax*plx_factor # barycenter motion
+    Lambda_pred = Lambda_com + delta_eta # binary motion
+
+    Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
+    Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
+    
+    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
+
+
 def get_a_mas(period, m1, m2, parallax):
     '''
     calculate the projected semi-major axis of a binary (not the photocenter)
@@ -340,6 +397,22 @@ def get_a_mas(period, m1, m2, parallax):
     G, Msun, AU = 6.6743e-11, 1.98840987069805e+30, 1.4959787e+11
     a_au = (((period*86400)**2 * G * (m1*Msun + m2*Msun)/(4*np.pi**2))**(1/3.))/AU
     return a_au*parallax
+    
+def get_a0_mas(period, m1, m2, parallax, f):
+    '''
+    calculate the projected photocenter semi-major axis of a binary 
+    period: orbital period in days
+    m1: mass of star 1 in Msun
+    m2: mass of star 2 in Msun
+    parallax: true parallax (i.e., 1/d) in mas. 
+    f = F2/F1 is flux ratio in G band. 
+    
+    '''
+    G, Msun, AU = 6.6743e-11, 1.98840987069805e+30, 1.4959787e+11
+    a_au = (((period*86400)**2 * G * (m1*Msun + m2*Msun)/(4*np.pi**2))**(1/3.))/AU
+    a_mas, q = a_au*parallax,  m2/m1
+    a0_mas = a_mas*(q/(1+q) - f/(1+f))
+    return a0_mas
     
 def fetch_table_element(colname, table):
     '''
