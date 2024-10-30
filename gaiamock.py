@@ -6,7 +6,6 @@ from astropy.table import Table
 import healpy as hp
 import joblib
 
-
 def al_uncertainty_per_ccd_interp(G):
     '''
     This gives the uncertainty *per CCD* (not per FOV transit), taken from Fig 3 of https://arxiv.org/abs/2206.05439
@@ -1025,7 +1024,6 @@ def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean
     else: 
         extra_noise = 0
     
-
     Lambda_pred = pmra*t_ast_yr*np.sin(psi) + pmdec*t_ast_yr*np.cos(psi) + parallax*plx_factor 
     Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
     Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
@@ -1033,42 +1031,39 @@ def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean
     return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
 
  
-def photocenter_orbit_2d(t_ast_yr, m1, m2, parallax, period, ecc, Tp, w, omega, inc, f, c_funcs):
+def photocenter_orbit_2d_from_thiele_innes(t_ast_yr, parallax, period, ecc, Tp, A, B, F, G,c_funcs):
     '''
-    this function calculates the part of a binary's astrometric motion that is due to the orbit, without parallax and proper motion. Basically (BX + GY)*spsi, (AX + FY)*cpsi 
+    this function calculates the part of a binary's astrometric motion that is due to the orbit, without parallax and proper motion. 
     t_ast_yr: times relative to reference epoch
-    m1, m2: mass of primary and companion, in Msun
     parallax: 1/distance; only used to calculate angular size of the orbit
     period: orbital period in days
     ecc: eccentricity 
-    Tp: periastron time in jd
-    w: little omega, in radians
-    omega: big Omega, in radians
-    inc: inclination, in radians
-    f: flux ratio, F2/F1
+    A,B,F,G: Thiele-Innnes elements, in mas
     c_funcs: from read_in_C_functions()
     '''
     EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
+    X, Y = np.cos(EE) - ecc,  np.sqrt(1-ecc**2)*np.sin(EE)
+    x, y = B*X + G*Y, A*X + F*Y       
+    return x, y
     
-    a_mas = get_a_mas(period, m1, m2, parallax)
-    A_pred = a_mas*( np.cos(w)*np.cos(omega) - np.sin(w)*np.sin(omega)*np.cos(inc) )
-    B_pred = a_mas*( np.cos(w)*np.sin(omega) + np.sin(w)*np.cos(omega)*np.cos(inc) )
-    F_pred = -a_mas*( np.sin(w)*np.cos(omega) + np.cos(w)*np.sin(omega)*np.cos(inc) )
-    G_pred = -a_mas*( np.sin(w)*np.sin(omega) - np.cos(w)*np.cos(omega)*np.cos(inc) )
-    
-    X = np.cos(EE) - ecc
-    Y = np.sqrt(1-ecc**2)*np.sin(EE)
-    
-    x, y = B_pred*X + G_pred*Y, A_pred*X + F_pred*Y   
-    y_photocenter =  np.array([al_bias_binary(delta_eta = -y[i], q=m2/m1, f=f) for i in range(len(t_ast_yr))])
-    x_photocenter =  np.array([al_bias_binary(delta_eta = -x[i], q=m2/m1, f=f) for i in range(len(t_ast_yr))])
-    return x_photocenter, y_photocenter
-    
-def plot_2d_orbit_and_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, ecc, Tp, m1, m2, delta_ra, delta_dec, parallax, pmra, pmdec, f, w, omega, inc, data_release, c_funcs):
+def plot_2d_orbit_and_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, ecc, Tp, delta_ra, delta_dec, parallax, pmra, pmdec, A, B, F, G, data_release, c_funcs):
     '''
     This function plots the 2D projected orbit of a binary together with the epoch astrometry
+    The approach it uses closely follows the pystromety package: https://github.com/Johannes-Sahlmann/pystrometry
+    t_ast_year: times at which the astrometric measurements are made, in years, relative to the reference epoch
+    psi:  scan angles of the astrometry, in radians
+    plx_factor: parallax factors of the astrometry
+    ast_obs, ast_err: epoch astrometry measurements in mas
+    period: orbital period in days
+    ecc: eccentricity 
+    Tp: periastron time relative to reference epoch
+    delta_ra, delta_dec: position at reference epoch relative to a reference position 
+    parallax, pmra, pmdec: in mas and mas/yr
+    A, B, F, G: Thiele-Innes coefficients in mas
+    data_release: 'dr3' or 'dr4' or 'dr4'
+    c_funcs: from read_in_C_functions()
     '''
-    x_periastron, y_periastron = photocenter_orbit_2d(t_ast_yr = np.array([Tp/365.25]), m1 = m1, m2 = m2, parallax = parallax, period = period, ecc = ecc, Tp = Tp, w = w, omega = omega, inc = inc, f = f, c_funcs = c_funcs)
+    x_periastron, y_periastron = photocenter_orbit_2d_from_thiele_innes(t_ast_yr = np.array([Tp/365.25]), parallax = parallax, period = period, Tp=Tp, ecc = ecc, A=A, B=B, F=F, G=G, c_funcs = c_funcs)
     
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -1077,11 +1072,12 @@ def plot_2d_orbit_and_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, per
     ax.plot(x_periastron, y_periastron, marker='s', color='0.5', mfc='0.5', zorder=10)
 
     t_grid = np.linspace(np.min(t_ast_yr), np.min(t_ast_yr) + period/365.25, 1000)
-    x_curve, y_curve = photocenter_orbit_2d(t_ast_yr = t_grid, m1 = m1, m2 = m2, parallax = parallax, period = period, ecc = ecc, Tp = Tp, w = w, omega = omega, inc = inc, f = f, c_funcs = c_funcs)
+    x_curve, y_curve = photocenter_orbit_2d_from_thiele_innes(t_ast_yr = t_grid, parallax = parallax, period = period, Tp=Tp, ecc = ecc, A=A, B=B, F=F, G=G, c_funcs = c_funcs)
     ax.plot(x_curve, y_curve, ls='-', lw=1, color='b')
     
 
-    x_epoch, y_epoch = photocenter_orbit_2d(t_ast_yr = t_ast_yr, m1 = m1, m2 = m2, parallax = parallax, period = period, ecc = ecc, Tp = Tp, w = w, omega = omega, inc = inc, f = f, c_funcs = c_funcs)
+    x_epoch, y_epoch = photocenter_orbit_2d_from_thiele_innes(t_ast_yr = t_ast_yr, parallax = parallax, period = period, Tp=Tp, ecc = ecc, A=A, B=B, F=F, G=G, c_funcs = c_funcs)
+
     orbit_exact = x_epoch*np.sin(psi) + y_epoch*np.cos(psi)
     Lambda_com = (delta_ra + pmra*t_ast_yr)*np.sin(psi) + (delta_dec + pmdec*t_ast_yr)*np.cos(psi) + parallax*plx_factor
     residuals = ast_obs - (orbit_exact + Lambda_com)
@@ -1105,6 +1101,7 @@ def get_Campbell_elements(A, B, F, G):
     Translate between Campbell elements and Thiele-Innes coefficients. Equations from the appendix of Halbwachs+2023. 
     Equations for uncertainties can also be found there but are more complicated and not implemented here. 
     A, B, F, G, are Thiele-Innes elements in mas. 
+    This function is not currently used anywhere in the code and should be double-checked if used 
     '''
     u = 0.5 * (A**2 + B**2 + F**2 + G**2)
     v = A * G - B * F
@@ -1115,7 +1112,8 @@ def get_Campbell_elements(A, B, F, G):
     w_minus_Omega = np.arctan((B+F)/(G-A)) % np.pi
     
     w = ((w_plus_Omega + w_minus_Omega) / 2) % np.pi
-    Omega = ((w_plus_Omega - w_minus_Omega) / 2) % np.pi
+    Omega = ((w_plus_Omega - w_minus_Omega) / 2) % np.pi    
+    
     return a0, inc, w, Omega
     
 def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxratio, tol=1e-6, max_iter=1000):
@@ -1156,6 +1154,10 @@ def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxrati
 def get_astrometric_likelihoods_worker(t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples):
     '''
     call this function through multiprocessing
+    this function calculates the likelihood of a large number of samples (from generate_prior_samples()). It is useful
+    for rejection sampling in the low-SNR regime. 
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of epoch astrometry
+    samples: (P, ecc, Tp) arrays from generate_prior_samples()
     '''
     c_funcs = read_in_C_functions()
     
@@ -1181,6 +1183,8 @@ def generate_prior_samples(N_samps, P_range = [10, 10000]):
     uniform in frequency (1/P)
     uniform in ecc
     uniform in phi0 = 2*pi*Tp/P
+    N_samps: how many samples to generate
+    P_range: over what range to generate samples, uniformly spaced in frequency (not in period)
     '''
     P = 1/np.random.uniform(1/P_range[0], 1/P_range[1], N_samps)
     ecc = np.random.uniform(0, 1, N_samps)

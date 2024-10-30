@@ -1,6 +1,6 @@
 /* Helper functions for quickly solving Kepler's equation and some other utilities for fitting astrometric binaries. 
 This needs to be compiled before the package can be used, and gsl needs to be linked for it to be compiled. On my Macbook, I installed gsl using homebrew and then compiled with: 
- gcc -shared -o kepler_solve_astrometry.so kepler_solve_astrometry.c -I/opt/homebrew/Cellar/gsl/2.7.1/include  -L/opt/homebrew/Cellar/gsl/2.7.1/lib -lgsl -lgslcblas -lm 
+ gcc -shared -o kepler_solve_astrometry.so kepler_solve_astrometry.c -I/opt/homebrew/Cellar/gsl/2.8/include  -L/opt/homebrew/Cellar/gsl/2.8/lib -lgsl -lgslcblas -lm 
 
 On my local cluster, I compiled with:
  gcc -shared -o kepler_solve_astrometry.so kepler_solve_astrometry.c -lgsl -lgslcblas -lm -fPIC*/
