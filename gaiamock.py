@@ -657,6 +657,9 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         if verbose:
             print('UWE < 1.4: returning only 5-parameter solution.')
         return res
+        
+    if c_funcs is None:
+        c_funcs = read_in_C_functions()
     
     # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
     F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=binned)
