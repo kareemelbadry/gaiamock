@@ -601,7 +601,7 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     if not np.sum(~np.isfinite(cov_x)):
         
         if reject_outlier:
-            nu, Nobs, nu_unbinned = len(ast_obs) - 13, len(ast_obs)-1, len(ast_obs)*8 - 13
+            nu, Nobs, nu_unbinned = len(ast_obs)-12-1, len(ast_obs)-1, (len(ast_obs)-1)*8 - 12
         else:
             nu, Nobs, nu_unbinned = len(ast_obs) - 12, len(ast_obs), len(ast_obs)*8 - 12  
         chi2_red_binned = np.sum(resid_func(p0)**2)/nu
@@ -644,13 +644,14 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     return uncertainties, a0, sigma_a0, inc_deg
 
 
-def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False):
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False):
     '''
     this function takes 1D astrometry and fits it with a cascade of astrometric models.  
     t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of astrometric measurements and related metadata
     c_funcs: from read_in_C_functions()
     verbose: whether to print results of fitting. 
     if show_residuals, plot the residuals of the best-fit 5-parameter solution and the best-fit orbital solution. This will only happen if an orbital solution is actually calculated (i.e., we get to that stage in the cascade.)
+    reject_outlier: if true, ignore the point with the worst chi2 when fitting the orbital solution
     '''    
     Nret = 23 # number of arguments to return 
     N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
@@ -713,22 +714,24 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
             plot_residuals_7par(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, theta_array = mu, c_funcs = c_funcs)
         return res
 
-    res = fit_orbital_solution_nonlinear(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs)
+    res = fit_orbital_solution_nonlinear(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, reject_outlier=reject_outlier)
     if verbose:
         print('found best-fit nonlinear parameters:', res)
     
     # get the linear parameters 
     period, phi_p, ecc = res
-    chi2, mu_linear = get_astrometric_chi2(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, P = period, phi_p = phi_p, ecc = ecc, c_funcs=c_funcs)
+    chi2, mu_linear = get_astrometric_chi2(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, P = period, phi_p = phi_p, ecc = ecc, c_funcs=c_funcs, reject_outlier=reject_outlier)
     ra_off, pmra, dec_off, pmdec, plx, B, G, A, F = mu_linear
     p0 = [ra_off, dec_off, plx, pmra, pmdec, period, ecc, phi_p, A, B, F, G]
     
     # get some uncertainties 
-    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=binned)
+    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=binned, reject_outlier=reject_outlier)
     sig_ra,sig_dec,sig_parallax,sig_pmra,sig_pmdec,sig_period,sig_ecc,sig_phi_p,sig_A,sig_B, sig_F,sig_G = errors
     
-    
-    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
+    if reject_outlier:
+        Nobs, nu, nu_unbinned = len(ast_obs)-1, len(ast_obs)-12-1, (len(ast_obs)-1)*8 - 12
+    else:
+        Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
     chi2_red_binned = chi2/nu
     chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
     
