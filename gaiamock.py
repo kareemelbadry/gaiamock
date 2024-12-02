@@ -28,7 +28,7 @@ def read_in_C_functions():
         raise ValueError('You need to compile kepler_solve_astrometry.c!')
     return c_funcs
     
-def get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, c_funcs):
+def get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, c_funcs, reject_outlier=False):
     '''
     this function takes arrays of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err), and a set of (P, phi_p, ecc), solves for the best-fit linear parameters, predicts the epoch astrometry, and calculates the chi2. It also returns the best-fit vector of linear parameters. This uses the compiled c function from kepler_solve_astrometry.so. 
     c_funcs comes from read_in_C_functions()
@@ -41,16 +41,19 @@ def get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, 
     ast_err_double = ast_err.astype(np.double)
     chi2_array = np.empty(10, dtype = np.double)
     
-    c_funcs.get_chi2_astrometry(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), 
-        ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), 
-         ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_void_p(chi2_array.ctypes.data))
+    if reject_outlier:
+        c_funcs.get_chi2_astrometry_reject_outliers(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_void_p(chi2_array.ctypes.data))
+    else:
+        c_funcs.get_chi2_astrometry(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_void_p(chi2_array.ctypes.data))
+        
+        
     chi2 = chi2_array[0]
     mu = chi2_array[1:] # ra_off, pmra, dec_off, pmdec, plx, B, G, A, F
     
     return chi2, mu
     
 
-def get_astrometric_residuals_12par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array, c_funcs):
+def get_astrometric_residuals_12par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array, c_funcs, reject_outlier=False):
     '''
     this function takes arrays of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err), and a 12-set of astrometric parameters, predicts the epoch astrometry, and calculates the array of uncertainty-scaled residuals. This uses the compiled c function from kepler_solve_astrometry.so. 
     theta_array = (ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G); should be a numpy array.
@@ -67,12 +70,14 @@ def get_astrometric_residuals_12par(t_ast_yr, psi, plx_factor, ast_obs, ast_err,
     
     c_funcs.get_residual_array_12par_solution(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), 
         ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data),  ctypes.c_void_p(theta_array_double.ctypes.data), ctypes.c_void_p(resid_array.ctypes.data))
-
+        
+    if reject_outlier:
+        resid_array[np.argmax(np.abs(resid_array))] = 0
     return np.array(resid_array)
 
 
 def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
-    L = np.array([10, 0, 0]), U = np.array([1e4, 2*np.pi, 0.99])):
+    L = np.array([10, 0, 0]), U = np.array([1e4, 2*np.pi, 0.99]), reject_outlier=False):
     '''
     this function takes arrays of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err) and solves for the best-fit tuple of nonlinear parameters (P, phi_p, e) via adaptive simulated annealing.  This uses the compiled c function from kepler_solve_astrometry.so. 
     c_funcs comes from read_in_C_functions()
@@ -89,7 +94,11 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
     U_double = U.astype(np.double)
     
     results_array = np.empty(3, dtype = np.double)
-    c_funcs.run_astfit(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)))    
+    
+    if reject_outlier:
+        c_funcs.run_astfit_reject_outlier(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)))    
+    else:
+        c_funcs.run_astfit(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)))    
     return results_array
     
 
@@ -556,7 +565,7 @@ def plot_residuals_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array
     ax[1].set_ylabel('residual (7 par)', fontsize=20)
 
     
-def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, p0, c_funcs, binned=True):
+def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, p0, c_funcs, binned=True, reject_outlier=False):
     '''
     This function calculates the Hessian matrix, approximated from the Jacobian, at a coordinate in 12-dimensional parameter space p0. 
     p0 = (ra_offset, dec_offset, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G)
@@ -571,7 +580,7 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     
     def resid_func(theta):
         '''helper function for Jacobian'''
-        return get_astrometric_residuals_12par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array = np.array(theta), c_funcs = c_funcs)
+        return get_astrometric_residuals_12par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array = np.array(theta), c_funcs = c_funcs, reject_outlier=reject_outlier)
             
     def jacobian(params, epsilon=1e-8):
         '''
@@ -590,7 +599,11 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     cov_x = np.linalg.inv(np.dot(J.T, J))  
 
     if not np.sum(~np.isfinite(cov_x)):
-        nu, Nobs, nu_unbinned = len(ast_obs) - 12, len(ast_obs), len(ast_obs)*8 - 12  
+        
+        if reject_outlier:
+            nu, Nobs, nu_unbinned = len(ast_obs) - 13, len(ast_obs)-1, len(ast_obs)*8 - 13
+        else:
+            nu, Nobs, nu_unbinned = len(ast_obs) - 12, len(ast_obs), len(ast_obs)*8 - 12  
         chi2_red_binned = np.sum(resid_func(p0)**2)/nu
         chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
         if binned:
@@ -1049,7 +1062,7 @@ def photocenter_orbit_2d_from_thiele_innes(t_ast_yr, parallax, period, ecc, Tp, 
     x, y = B*X + G*Y, A*X + F*Y       
     return x, y
     
-def plot_2d_orbit_and_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, ecc, Tp, delta_ra, delta_dec, parallax, pmra, pmdec, A, B, F, G, data_release, c_funcs):
+def plot_2d_orbit_and_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, ecc, Tp, delta_ra, delta_dec, parallax, pmra, pmdec, A, B, F, G, data_release, c_funcs, ax=None):
     '''
     This function plots the 2D projected orbit of a binary together with the epoch astrometry
     The approach it uses closely follows the pystromety package: https://github.com/Johannes-Sahlmann/pystrometry
@@ -1065,11 +1078,13 @@ def plot_2d_orbit_and_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, per
     A, B, F, G: Thiele-Innes coefficients in mas
     data_release: 'dr3' or 'dr4' or 'dr4'
     c_funcs: from read_in_C_functions()
+    if ax is not None, incorporate this in another figure 
     '''
     x_periastron, y_periastron = photocenter_orbit_2d_from_thiele_innes(t_ast_yr = np.array([Tp/365.25]), parallax = parallax, period = period, Tp=Tp, ecc = ecc, A=A, B=B, F=F, G=G, c_funcs = c_funcs)
     
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
+    if ax is None:
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
     
     ax.plot([0, x_periastron[0]], [0, y_periastron[0]], marker='.', ls='-', lw=0.5, color='0.5')
     ax.plot(x_periastron, y_periastron, marker='s', color='0.5', mfc='0.5', zorder=10)
@@ -1103,22 +1118,48 @@ def get_Campbell_elements(A, B, F, G):
     '''
     Translate between Campbell elements and Thiele-Innes coefficients. Equations from the appendix of Halbwachs+2023. 
     Equations for uncertainties can also be found there but are more complicated and not implemented here. 
-    A, B, F, G, are Thiele-Innes elements in mas. 
-    This function is not currently used anywhere in the code and should be double-checked if used 
+    A, B, F, G are Thiele-Innes elements in mas, provided as scalars or arrays.
+    Adapted from NSSTools 
     '''
-    u = 0.5 * (A**2 + B**2 + F**2 + G**2)
+    # Compute wp - Omega and wm - Omega
+    wp_minus_Omega = np.arctan2(B - F, A + G)  # Argument of periapsis + ascending node
+    wm_minus_Omega = np.arctan2(-B - F, A - G)  # Argument of periapsis - ascending node
+
+    # Initial estimates for w and Omega
+    w = (wp_minus_Omega + wm_minus_Omega) / 2.0  # Argument of periapsis
+    Omega = (wp_minus_Omega - wm_minus_Omega) / 2.0  # Longitude of ascending node
+
+    # Ensure Omega is between 0 and pi
+    Omega = np.where(Omega < 0, Omega + np.pi, Omega)  # Adjust Omega by adding pi
+    w = np.where(Omega < 0, w + np.pi, w)  # Adjust w accordingly
+
+    # Calculate tan^2(i/2) using two formulas
+    tan2_i_AG = np.abs((A + G) * np.cos(wm_minus_Omega))
+    tan2_i_BF = np.abs((F - B) * np.sin(wm_minus_Omega))
+
+    # Choose the formula with the larger denominator for stability
+    use_tan2_i_AG = tan2_i_AG > tan2_i_BF
+    inclination = np.where(
+        use_tan2_i_AG,
+        2.0 * np.arctan2(np.sqrt(np.abs((A - G) * np.cos(wp_minus_Omega))), np.sqrt(tan2_i_AG)),
+        2.0 * np.arctan2(np.sqrt(np.abs((B + F) * np.sin(wp_minus_Omega))), np.sqrt(tan2_i_BF))
+    )
+
+    # Compute semi-major axis
+    u = (A**2 + B**2 + F**2 + G**2) / 2.0
     v = A * G - B * F
-    a0 = np.sqrt(u + np.sqrt(u**2 - v**2))
-    inc = np.arccos(v/(a0*a0))
-    
-    w_plus_Omega = np.arctan((B-F)/(A+G)) % np.pi
-    w_minus_Omega = np.arctan((B+F)/(G-A)) % np.pi
-    
-    w = ((w_plus_Omega + w_minus_Omega) / 2) % np.pi
-    Omega = ((w_plus_Omega - w_minus_Omega) / 2) % np.pi    
-    
-    return a0, inc, w, Omega
-    
+    sqrt_u2_minus_v2 = np.sqrt((u + v) * (u - v))
+    a0 = np.sqrt(u + sqrt_u2_minus_v2)
+
+    # Ensure w is between 0 and 2*pi
+    w = np.where(w > 2 * np.pi, w - 2 * np.pi, w)
+    w = np.where(w < 0, w + 2 * np.pi, w)
+
+    # Convert to scalars if inputs are scalars
+    if np.isscalar(A) and np.isscalar(B) and np.isscalar(F) and np.isscalar(G):
+        return float(a0), float(Omega), float(w), float(inclination)
+    return a0, Omega, w, inclination
+        
 def get_companion_mass_from_mass_function(M1, a0_mas, period, parallax, fluxratio, tol=1e-6, max_iter=1000):
     '''
     This function calculates M2 from M1 and the parameters of the astrometric orbit, assuming a flux ratio. 
@@ -1160,7 +1201,7 @@ def get_astrometric_likelihoods_worker(t_ast_yr, psi, plx_factor, ast_obs, ast_e
     this function calculates the likelihood of a large number of samples (from generate_prior_samples()). It is useful
     for rejection sampling in the low-SNR regime. 
     t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of epoch astrometry
-    samples: (P, ecc, Tp) arrays from generate_prior_samples()
+    samples: (P, ecc, phi_p) arrays from generate_prior_samples()
     '''
     c_funcs = read_in_C_functions()
     
@@ -1182,7 +1223,7 @@ def get_astrometric_likelihoods_worker(t_ast_yr, psi, plx_factor, ast_obs, ast_e
 
 def generate_prior_samples(N_samps, P_range = [10, 10000]):
     '''
-    This function produces samples of (P, ecc, Tp), for which we can calculate likelihoods for rejection sampling. 
+    This function produces samples of (P, ecc, phi_p), for which we can calculate likelihoods for rejection sampling. 
     uniform in frequency (1/P)
     uniform in ecc
     uniform in phi0 = 2*pi*Tp/P
@@ -1191,9 +1232,9 @@ def generate_prior_samples(N_samps, P_range = [10, 10000]):
     '''
     P = 1/np.random.uniform(1/P_range[0], 1/P_range[1], N_samps)
     ecc = np.random.uniform(0, 1, N_samps)
-    phi0 = np.random.uniform(0, 2*np.pi, N_samps)
-    Tp = phi0*P/(2*np.pi)
-    return (P, ecc, Tp)
+    phi_p = np.random.uniform(0, 2*np.pi, N_samps)
+    #Tp = phi0*P/(2*np.pi)
+    return (P, ecc, phi_p)
     
 
 def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples):
