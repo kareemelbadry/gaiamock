@@ -644,7 +644,7 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     return uncertainties, a0, sigma_a0, inc_deg
 
 
-def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False):
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10):
     '''
     this function takes 1D astrometry and fits it with a cascade of astrometric models.  
     t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of astrometric measurements and related metadata
@@ -714,7 +714,8 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
             plot_residuals_7par(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, theta_array = mu, c_funcs = c_funcs)
         return res
 
-    res = fit_orbital_solution_nonlinear(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, reject_outlier=reject_outlier)
+    res = fit_orbital_solution_nonlinear(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, L = np.array([P_min, 0, 0]), reject_outlier=reject_outlier)
+        
     if verbose:
         print('found best-fit nonlinear parameters:', res)
     
@@ -733,7 +734,6 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     else:
         Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
     chi2_red_binned = chi2/nu
-    chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
     
     if binned:
         F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
