@@ -458,6 +458,20 @@ def get_gost_one_position(ra, dec, data_release):
         raise ValueError('invalid data_release!')
     return tab[m]
 
+def get_residuals_12par_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array, c_funcs):
+    '''
+    this function takes a set of epoch astrometry (as described by t_ast_yr, psi, plx_factor, ast_obs, and ast_err), and a set of nonlinear parameters theta_array = (Porb, phi_p, ecc), and predicts the epoch astrometry. It returns the predicted astrometry. 
+    '''
+    Cinv = np.diag(1/ast_err**2)  
+    period, Tp, ecc = theta_array[0], theta_array[1]*theta_array[0]/(2*np.pi), theta_array[2]
+    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
+    X = np.cos(EE) - ecc
+    Y = np.sqrt(1-ecc**2)*np.sin(EE) 
+    M = np.vstack([np.sin(psi), t_ast_yr*np.sin(psi), np.cos(psi), t_ast_yr*np.cos(psi), plx_factor, X*np.sin(psi), Y*np.sin(psi), X*np.cos(psi), Y*np.cos(psi)]).T  
+    mu = np.linalg.solve(M.T @ Cinv @ M, M.T @ Cinv @ ast_obs) 
+    Lambda_pred = np.dot(M, mu) 
+    return Lambda_pred
+    
 def plot_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array, c_funcs):
     '''
     this function takes a set of epoch astrometry (as described by t_ast_yr, psi, plx_factor, ast_obs, and ast_err), and a set of nonlinear parameters theta_array = (Porb, phi_p, ecc), and predicts the epoch astrometry. It also calculates the best-fit 5 parameter solution for the same astrometry. Finally, it plots the epoch astrometry residuals as a function of time for both solutions. 
@@ -481,13 +495,7 @@ def plot_residuals(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array, c_f
     ax[0].errorbar(t_ast_yr, ast_obs - Lambda_pred, yerr=ast_err, fmt='k.')
     print('single star chi2: %.2f'  % (np.sum( (ast_obs - Lambda_pred)**2 / ast_err**2 )) )
     
-    period, Tp, ecc = theta_array[0], theta_array[1]*theta_array[0]/(2*np.pi), theta_array[2]
-    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
-    X = np.cos(EE) - ecc
-    Y = np.sqrt(1-ecc**2)*np.sin(EE) 
-    M = np.vstack([np.sin(psi), t_ast_yr*np.sin(psi), np.cos(psi), t_ast_yr*np.cos(psi), plx_factor, X*np.sin(psi), Y*np.sin(psi), X*np.cos(psi), Y*np.cos(psi)]).T  
-    mu = np.linalg.solve(M.T @ Cinv @ M, M.T @ Cinv @ ast_obs) 
-    Lambda_pred = np.dot(M, mu) 
+    Lambda_pred = get_residuals_12par_solution(t_ast_yr = t_ast_yr, psi=psi, plx_factor=plx_factor, ast_obs=ast_obs, ast_err=ast_err, theta_array=theta_array, c_funcs=c_funcs) 
         
     print('binary star chi2: %.2f'  % (np.sum( (ast_obs - Lambda_pred)**2 / ast_err**2 )) )
     ax[1].errorbar(t_ast_yr, ast_obs - Lambda_pred, yerr=ast_err, fmt='k.')
@@ -1133,8 +1141,8 @@ def get_Campbell_elements(A, B, F, G):
     Omega = (wp_minus_Omega - wm_minus_Omega) / 2.0  # Longitude of ascending node
 
     # Ensure Omega is between 0 and pi
-    Omega = np.where(Omega < 0, Omega + np.pi, Omega)  # Adjust Omega by adding pi
     w = np.where(Omega < 0, w + np.pi, w)  # Adjust w accordingly
+    Omega = np.where(Omega < 0, Omega + np.pi, Omega)  # Adjust Omega by adding pi
 
     # Calculate tan^2(i/2) using two formulas
     tan2_i_AG = np.abs((A + G) * np.cos(wm_minus_Omega))
