@@ -6,7 +6,7 @@ This is a package for simulating Gaia astrometry at the epoch level. To install 
 
 (1) clone this repository (click the green "code" button in the upper right of this page).
 
-(2) download the file healpix_scans.zip from [this](https://caltech.box.com/s/hi8ftcz9aeis0a32p8edlrn1ejbhfpf3) link.
+(2) download the file healpix_scans.zip from [this](https://caltech.box.com/s/4f7q6qdh0bku881bzvzxc4cm5u0902cf) link.
 Unzip it inside gaiamock/ so that you have a directory gaiamock/healpix_scans/. That directory should have 49152 fits files inside it. The total size after unzipping will be 984 MB. 
 
 (3) If you don't already have it installed, install [GSL](https://www.gnu.org/software/gsl/). On a Mac, this is likely most easily accomplished via Homebrew. 
