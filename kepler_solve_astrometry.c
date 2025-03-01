@@ -125,6 +125,38 @@ void get_residual_array_12par_solution(int n_obs, double *t_ast_yr, double *psi,
 }
 
 
+/* This function takes a length-12 theta array
+theta_array = (ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, w, Omega, a0_mas, inc)  
+it calculates the predicted epoch astrometry at a times t_ast_yr, with scan angles psi and parallax factors plx_factor, 
+and then fills in an array of uncertainty-scaled residuals, (ast_pred - ast_obs)/ast_err. This is used for calculating the Jacobian. w, Omega, and inc are all in radians; a0 is in mas. 
+ */ 
+void get_residual_array_12par_solution_campbell(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *theta_array, double *residual_array) {
+    double xtol = 1e-10;
+    double Ei;
+    double Mi;
+    double X;
+    double Y; 
+    double Lambda_pred;
+    
+    double A = theta_array[10] * (cos(theta_array[8]) * cos(theta_array[9]) - sin(theta_array[8]) * sin(theta_array[9]) * cos(theta_array[11]));
+    double B = theta_array[10] * (cos(theta_array[8]) * sin(theta_array[9]) + sin(theta_array[8]) * cos(theta_array[9]) * cos(theta_array[11]));
+    double F = -theta_array[10] * (sin(theta_array[8]) * cos(theta_array[9]) + cos(theta_array[8]) * sin(theta_array[9]) * cos(theta_array[11]));
+    double G = -theta_array[10] * (sin(theta_array[8]) * sin(theta_array[9]) - cos(theta_array[8]) * cos(theta_array[9]) * cos(theta_array[11]));
+    
+    
+    for(int j = 0; j < n_obs; j++){
+        Mi = 2*PI*t_ast_yr[j]*365.25/theta_array[5] - theta_array[7];
+        Ei = solve_Kepler_equation(Mi, theta_array[6], xtol);
+        
+        X = cos(Ei) - theta_array[6];
+        Y = sqrt(1-theta_array[6]*theta_array[6])*sin(Ei);
+        
+        Lambda_pred = (theta_array[0] + theta_array[3]*t_ast_yr[j] + B*X + G*Y)*sin(psi[j]) + (theta_array[1] + theta_array[4]*t_ast_yr[j] + A*X + F*Y)*cos(psi[j]) + plx_factor[j]*theta_array[2]; 
+        residual_array[j] = (Lambda_pred - ast_obs[j])/ast_err[j];
+    }
+}
+
+
 /*  This function takes a single set of (P, phi_p, ecc). It then solves for the best-fit linear parameters and predicts the epoch astrometry at time t_ast_yr, and calculates the corresponding chi2. n_obs is length of the observations array.
 the first element of chi2_array will be the chi2. The next 9 elements are the best-fit linear parameters for this (P, phi_p, ecc) */
 void get_chi2_astrometry(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double P, double phi_p, double ecc, double *chi2_array){

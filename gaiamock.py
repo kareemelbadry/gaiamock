@@ -76,6 +76,29 @@ def get_astrometric_residuals_12par(t_ast_yr, psi, plx_factor, ast_obs, ast_err,
     return np.array(resid_array)
 
 
+def get_astrometric_residuals_12par_campbell(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array, c_funcs, reject_outlier=False):
+    '''
+    this function takes arrays of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err), and a 12-set of astrometric parameters, predicts the epoch astrometry, and calculates the array of uncertainty-scaled residuals. This uses the compiled c function from kepler_solve_astrometry.so. 
+    theta_array = (ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, w, Omega, a0_mas, inc); should be a numpy array. w, Omega, and inc are all in radians. 
+    c_funcs comes from read_in_C_functions()
+    '''
+    t_ast_yr_double = t_ast_yr.astype(np.double)
+    psi_double = psi.astype(np.double)
+    plx_factor_double = plx_factor.astype(np.double)
+    ast_obs_double = ast_obs.astype(np.double)
+    ast_err_double = ast_err.astype(np.double)
+    theta_array_double = theta_array.astype(np.double)
+    
+    resid_array = np.zeros(len(t_ast_yr), dtype = np.double)
+    
+    c_funcs.get_residual_array_12par_solution_campbell(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), 
+        ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data),  ctypes.c_void_p(theta_array_double.ctypes.data), ctypes.c_void_p(resid_array.ctypes.data))
+        
+    if reject_outlier:
+        resid_array[np.argmax(np.abs(resid_array))] = 0
+    return np.array(resid_array)
+
+
 def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
     L = np.array([10, 0, 0]), U = np.array([1e4, 2*np.pi, 0.99]), reject_outlier=False):
     '''
@@ -101,6 +124,78 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         c_funcs.run_astfit(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)))    
     return results_array
     
+def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, p0, reject_outlier=False,
+    nburn = 2500, nstep = 2500, nwalkers=64):
+    '''
+    this function takes a starting guess p0 = [ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G] and runs an MCMC 
+    '''
+    import emcee
+    
+    bound_low = [None, None, None, None, None, 0, 0, 0, None, None, None, None]
+    bound_high = [None, None, None, None, None, None, 1, 2*np.pi, None, None, None, None]
+    bounds = [bound_low, bound_high]
+    
+    def ln_likelihood(theta):
+        resids_norm = get_astrometric_residuals_12par(t_ast_yr=t_ast_yr, psi=psi, plx_factor=plx_factor, ast_obs=ast_obs, ast_err=ast_err, theta_array=theta, c_funcs=c_funcs, reject_outlier=reject_outlier)
+        return -0.5*np.sum(resids_norm**2)
+        
+    def ln_posterior(theta):
+        lnprior = ln_flat_prior(theta = theta, theta_bounds = bounds)
+        if np.isfinite(lnprior):
+            lnlikelihood = ln_likelihood(theta)
+        else:
+            lnlikelihood = 0 
+        if np.isnan(lnlikelihood):
+            return -np.inf
+        return lnprior + lnlikelihood
+        
+    p0_ball = get_good_p0_ball(p0 = np.array(p0), theta_bounds = bounds, nwalkers = nwalkers)
+    ndim = len(p0)
+    print('initialized walkers... burning in...')
+
+    sampler = emcee.EnsembleSampler(nwalkers, ndim, ln_posterior)
+    pos, prob, state = sampler.run_mcmc(p0_ball, nburn, progress=True)
+    sampler.reset()
+    print('completed burn in ...')
+    pos, prob, state = sampler.run_mcmc(pos, nstep, progress=True)
+    return sampler
+
+def mcmc_fit_with_campbell_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, p0, reject_outlier=False,
+    nburn = 2500, nstep = 2500, nwalkers=64):
+    '''
+    this function takes a starting guess p0 = [ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, w, Omega, a0_mas, inc] and runs an MCMC 
+    '''
+    import emcee
+    
+    bound_low = [None, None, None, None, None, 0, 0, 0, 0, 0, None, 0]
+    bound_high = [None, None, None, None, None, None, 1, 2*np.pi, 2*np.pi, np.pi, None, np.pi]
+    bounds = [bound_low, bound_high]
+    
+    def ln_likelihood(theta):
+        resids_norm = get_astrometric_residuals_12par_campbell(t_ast_yr=t_ast_yr, psi=psi, plx_factor=plx_factor, ast_obs=ast_obs, ast_err=ast_err, theta_array=theta, c_funcs=c_funcs, reject_outlier=reject_outlier)
+        return -0.5*np.sum(resids_norm**2)
+        
+    def ln_posterior(theta):
+        lnprior = ln_flat_prior(theta = theta, theta_bounds = bounds)
+        if np.isfinite(lnprior):
+            lnlikelihood = ln_likelihood(theta)
+        else:
+            lnlikelihood = 0 
+        if np.isnan(lnlikelihood):
+            return -np.inf
+        return lnprior + lnlikelihood
+        
+    p0_ball = get_good_p0_ball(p0 = np.array(p0), theta_bounds = bounds, nwalkers = nwalkers)
+    ndim = len(p0)
+    print('initialized walkers... burning in...')
+
+    sampler = emcee.EnsembleSampler(nwalkers, ndim, ln_posterior)
+    pos, prob, state = sampler.run_mcmc(p0_ball, nburn, progress=True)
+    sampler.reset()
+    print('completed burn in ...')
+    pos, prob, state = sampler.run_mcmc(pos, nstep, progress=True)
+    return sampler
+
 
 def solve_kepler_eqn_on_array(M, ecc, c_funcs, xtol = 1e-10):
     '''
@@ -1244,7 +1339,6 @@ def generate_prior_samples(N_samps, P_range = [10, 10000]):
     P = 1/np.random.uniform(1/P_range[0], 1/P_range[1], N_samps)
     ecc = np.random.uniform(0, 1, N_samps)
     phi_p = np.random.uniform(0, 2*np.pi, N_samps)
-    #Tp = phi0*P/(2*np.pi)
     return (P, ecc, phi_p)
     
 
@@ -1267,4 +1361,46 @@ def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, sam
     L = np.exp(np.concatenate(res))
     return L
  
+def get_good_p0_ball(p0, theta_bounds, nwalkers, scatter = 0.001):
+    '''
+    this is a helper function for running mcmc. 
+    p0 is a point in parameter space that we think might have a high probability. 
+    This initializes all nwalkers, making sure that they don't start somewhere withb0 probability. 
+    theta_bounds are the region in which the prior is finite
+    '''
+    num_good_p0 = 0
+    ball_of_p0 = []
+    while num_good_p0 < nwalkers:
+        suggested_p0 = p0 + np.array([scatter*j*np.random.randn() for j in p0])
+        suggested_p0_prob = ln_flat_prior(suggested_p0, theta_bounds = theta_bounds)
+        
+        if np.isfinite(suggested_p0_prob):
+            ball_of_p0.append(suggested_p0)
+            num_good_p0 += 1
+    return ball_of_p0
+
+def theta_is_within_bounds(theta, theta_bounds):
+    """
+    Helper function for running MCMC.
+    Parameters:
+    - theta: list of floats.
+    - theta_bounds: list of two lists:
+        - theta_bounds[0]: lower bounds (None for no lower bound)
+        - theta_bounds[1]: upper bounds (None for no upper bound)
+    Returns:
+    - bool: True if all parameters are within bounds, False otherwise.
+    """
+    bound_low, bound_high = theta_bounds  
+    return all(
+        (lb if lb is not None else -np.inf) <= param < (ub if ub is not None else np.inf)
+        for param, lb, ub in zip(theta, bound_low, bound_high)
+    )
     
+def ln_flat_prior(theta, theta_bounds):
+    '''
+    this is a helper function for running mcmc. 
+    '''
+    if theta_is_within_bounds(theta, theta_bounds):
+        return 0
+    else: 
+        return -np.inf
