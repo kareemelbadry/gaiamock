@@ -369,7 +369,7 @@ def rescale_times_astrometry(jd, data_release):
     t_ast_yr = t_ast_day/365.25
     return t_ast_yr
     
-def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs, do_blending_noise = False):
+def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs, do_blending_noise = False, reject_10_percent = True):
     '''
     this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia. 
     ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
@@ -392,7 +392,8 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     t = get_gost_one_position(ra, dec, data_release=data_release)
     
     # reject a random 10%
-    t = t[np.random.uniform(0, 1, len(t)) > 0.1]
+    if reject_10_percent:
+        t = t[np.random.uniform(0, 1, len(t)) > 0.1]
     psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
     t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
     
@@ -747,6 +748,23 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     return uncertainties, a0, sigma_a0, inc_deg
 
 
+def fit_5par_solution_only(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
+    '''
+    this function takes 1D astrometry and fits it with a 5-parameter solution 
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of astrometric measurements and related metadata
+    returns  ra_off, pmra, dec_off, pmdec, plx, ra_off_err, pmra_err, dec_off_err, pmdec_err, plx_err, ruwe
+    '''    
+    
+    Nret = 11 # number of arguments to return 
+    N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
+    if (N_visibility_periods < 5) or (len(ast_obs) < 6): 
+        return Nret*[0]
+    
+    # check 5-parameter solution 
+    ruwe, mu, sigma_mu = check_ruwe(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, binned=binned)
+    return [mu[0], mu[1], mu[2], mu[3], mu[4], sigma_mu[0], sigma_mu[1], sigma_mu[2], sigma_mu[3], sigma_mu[4], ruwe]
+        
+
 def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10):
     '''
     this function takes 1D astrometry and fits it with a cascade of astrometric models.  
@@ -910,7 +928,6 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
     # potentially blended, so rerun 
     if (period > 1e4) and (res[-2] < 25) & (res[-6]/res[-5] > 5): 
         t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, do_blending_noise = True)
-        Nret = 23 # number of arguments to return 
         N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
         if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
             if verbose:
@@ -918,6 +935,33 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
             return Nret*[0]
         res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration) 
 
+    return res
+    
+def run_only_5par_solution(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs):
+    '''
+    this function generates the mock 1D astrometry for a binary and then fits it with a 5-parameter solution.
+    ra, dec: coordinates, in degrees
+    parallax: true parallax in mas
+    pmra, pmdec, true proper motions in mas/yr
+    m1: mass of star 1 in Msun
+    m2: mass of star 2 in Msun
+    period: orbital period in days
+    Tp: periastron time in days
+    ecc: eccentricity
+    omega: "big Omega" in radians
+    inc_deg: inclination in degrees, defined so that 0 or 180 is face-on, and 90 is edge-on. 
+    w: "little omega" in radians
+    epoch_err_mas: this is the uncertainty in AL displacement per FOV transit (not per CCD)
+    f: flux ratio, F2/F1, in the G-band. 
+    data_release: 'dr3', 'dr4', or 'dr5'
+    c_funcs: from read_in_C_functions()
+    '''
+    if c_funcs is None:
+        c_funcs = read_in_C_functions()
+
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs)
+
+    res = fit_5par_solution_only(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, binned = True)
     return res
 
 def xyz_to_galactic(x, y, z):
