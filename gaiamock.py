@@ -255,6 +255,46 @@ def check_ruwe(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
     sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
     
     return ruwe, mu, sigma_mu
+    
+        
+def get_5par_solution_and_sigma_5d_max(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
+    '''
+    This function takes a set of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err) and fits a 5-parameter solution. It inflates the uncertainties according to the goodness of fit and returns the 5-parameter UWE, best-fit parameters, and uncertainties. 
+    When calculating ruwe and parallax uncertainty inflation factors, we need to account for the fact that we binned
+        (averaging 8 ccds per FOV transit), because binning does not conserve reduced chi^2. 
+    unlike check_ruwe(), this function then also calculates sigma5d_max
+    '''
+    Cinv = np.diag(1/ast_err**2)    
+    M = np.vstack([np.sin(psi), t_ast_yr*np.sin(psi), np.cos(psi), t_ast_yr*np.cos(psi), plx_factor]).T 
+    mu = np.linalg.solve(M.T @ Cinv @ M, M.T @ Cinv @ ast_obs)  
+    Lambda_pred = np.dot(M, mu)
+    resids = ast_obs - Lambda_pred
+    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 5, len(ast_obs)*8 - 5  
+    chi2_red_binned = np.sum(resids**2/ast_err**2)/nu
+    chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 5, N_points = Nobs, Nbin=8)
+    
+    if binned:
+        ruwe = np.sqrt(chi2_red_unbinned)
+        cc = np.sqrt(chi2_red_unbinned/((1-2/(9*nu_unbinned))**3 ))
+    else:
+        ruwe = np.sqrt(chi2_red_binned)
+        cc = np.sqrt(chi2_red_binned/((1-2/(9*nu))**3 ))
+        
+    cov_matrix = np.linalg.inv(M.T @ Cinv @ M)
+    sigma_mu = cc*np.sqrt(np.diag(cov_matrix))
+    
+    xi = np.deg2rad(45)  # Solar aspect angle
+    T = 2.76383  # Gaia nominal time coverage in years
+    
+    S = np.diag([1, 1, np.sin(xi), T/2, T/2])
+    scaled_cov_matrix = S @ cov_matrix @ S
+    
+    # Compute singular values and get the largest one
+    singular_values = np.linalg.svd(scaled_cov_matrix, compute_uv=False)
+    sigma5d_max = cc*np.sqrt(np.max(singular_values))
+    
+    return ruwe, mu, sigma_mu, sigma5d_max
+
 
 def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
     '''
@@ -752,17 +792,17 @@ def fit_5par_solution_only(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned =
     '''
     this function takes 1D astrometry and fits it with a 5-parameter solution 
     t_ast_yr, psi, plx_factor, ast_obs, ast_err: arrays of astrometric measurements and related metadata
-    returns  ra_off, pmra, dec_off, pmdec, plx, ra_off_err, pmra_err, dec_off_err, pmdec_err, plx_err, ruwe
+    returns  ra_off, pmra, dec_off, pmdec, plx, ra_off_err, pmra_err, dec_off_err, pmdec_err, plx_err, ruwe, sigma5d_max
     '''    
     
-    Nret = 11 # number of arguments to return 
+    Nret = 12 # number of arguments to return 
     N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
     if (N_visibility_periods < 5) or (len(ast_obs) < 6): 
         return Nret*[0]
     
-    # check 5-parameter solution 
-    ruwe, mu, sigma_mu = check_ruwe(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, binned=binned)
-    return [mu[0], mu[1], mu[2], mu[3], mu[4], sigma_mu[0], sigma_mu[1], sigma_mu[2], sigma_mu[3], sigma_mu[4], ruwe]
+    ruwe, mu, sigma_mu, sigma5d_max = get_5par_solution_and_sigma_5d_max(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs=ast_obs, ast_err=ast_err, binned = binned)
+    
+    return [mu[0], mu[1], mu[2], mu[3], mu[4], sigma_mu[0], sigma_mu[1], sigma_mu[2], sigma_mu[3], sigma_mu[4], ruwe, sigma5d_max]
         
 
 def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10):
