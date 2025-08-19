@@ -150,12 +150,76 @@ test:
 	@$(PYTHON) -c "import numpy, matplotlib, healpy, joblib; print('All required packages imported successfully')"
 	@echo "Installation test passed!"
 
+# Setup Python package structure
+.PHONY: setup-package
+setup-package:
+	@echo "Setting up Python package structure..."
+	@if [ ! -f __init__.py ]; then \
+		echo "Creating __init__.py..."; \
+		echo "\"\"\"" > __init__.py; \
+		echo "gaiamock - Gaia astrometry simulation package" >> __init__.py; \
+		echo "\"\"\"" >> __init__.py; \
+		echo "" >> __init__.py; \
+		echo "__version__ = '1.0.0'" >> __init__.py; \
+		echo "" >> __init__.py; \
+		echo "# Import main modules when package is imported" >> __init__.py; \
+		echo "# Add your main classes/functions here as they become available" >> __init__.py; \
+	fi
+
+# Install package in development mode (editable install)
+.PHONY: install-editable
+install-editable: setup-package
+	@echo "Installing gaiamock in development mode..."
+	$(PIP) install -e .
+
+# Create setup.py for proper package installation
+.PHONY: create-setup
+create-setup:
+	@if [ ! -f setup.py ]; then \
+		echo "Creating setup.py..."; \
+		echo "from setuptools import setup, find_packages" > setup.py; \
+		echo "" >> setup.py; \
+		echo "setup(" >> setup.py; \
+		echo "    name='gaiamock'," >> setup.py; \
+		echo "    version='1.0.0'," >> setup.py; \
+		echo "    description='Gaia astrometry simulation package'," >> setup.py; \
+		echo "    packages=find_packages()," >> setup.py; \
+		echo "    install_requires=[" >> setup.py; \
+		echo "        'numpy'," >> setup.py; \
+		echo "        'matplotlib'," >> setup.py; \
+		echo "        'healpy'," >> setup.py; \
+		echo "        'joblib'," >> setup.py; \
+		echo "    ]," >> setup.py; \
+		echo "    python_requires='>=3.6'," >> setup.py; \
+		echo ")" >> setup.py; \
+	fi
+
+# Complete package setup with editable install
+.PHONY: package-install
+package-install: install create-setup setup-package install-editable
+	@echo "Package installation complete!"
+	@echo "You can now use 'import gaiamock' in Python."
+
+# Add PYTHONPATH setup for development
+.PHONY: setup-pythonpath
+setup-pythonpath:
+	@echo "To use gaiamock without installation, add this to your ~/.bashrc or ~/.zshrc:"
+	@echo "export PYTHONPATH=\"$(PWD):\$PYTHONPATH\""
+	@echo ""
+	@echo "Or run this in your current shell:"
+	@echo "export PYTHONPATH=\"$(PWD):\$PYTHONPATH\""
+
 # Help target
 .PHONY: help
 help:
 	@echo "Gaiamock Makefile - Available targets:"
 	@echo ""
 	@echo "  install         - Complete installation (default)"
+	@echo "  package-install - Complete installation + Python package setup"
+	@echo "  install-editable- Install as editable Python package"
+	@echo "  setup-package   - Create __init__.py for package structure"
+	@echo "  create-setup    - Create setup.py file"
+	@echo "  setup-pythonpath- Show how to add to PYTHONPATH"
 	@echo "  install-deps    - Install Python dependencies only"
 	@echo "  install-mwdust  - Install optional mwdust package"
 	@echo "  check-gsl       - Check/install GSL library"
@@ -167,6 +231,10 @@ help:
 	@echo "  clean           - Remove compiled files"
 	@echo "  clean-all       - Remove all generated/downloaded files"
 	@echo "  help            - Show this help message"
+	@echo ""
+	@echo "For Python package import:"
+	@echo "  make package-install  - Recommended: Full setup with editable install"
+	@echo "  make setup-pythonpath - Alternative: Use PYTHONPATH method"
 	@echo ""
 	@echo "Notes:"
 	@echo "  - The healpix_scans.zip file must be downloaded manually from:"
