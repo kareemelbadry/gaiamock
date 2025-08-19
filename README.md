@@ -8,7 +8,9 @@ A package for simulating Gaia astrometry at the epoch level.
 - **David W. Hogg** (MPIA)
 
 ## license:
-Copyright 2025 the author. All rights reserved?
+Copyright 2025 the author.
+All code here is released for re-use under the open-source *MIT License*.
+See the file `LICENSE` for details.
 
 ## installation:
 Try just doing
