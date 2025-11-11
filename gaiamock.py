@@ -529,6 +529,73 @@ def predict_astrometry_binary_in_terms_of_a0(ra, dec, parallax, pmra, pmdec, per
     
     return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
 
+def predict_astrometry_binary_in_terms_of_a0_more_realistic_noise(ra, dec, parallax, pmra, pmdec, period, Tp, ecc, omega, inc, w, a0_mas, phot_g_mean_mag, data_release, c_funcs):
+    '''
+    this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia, in terms of a0. It is only valid in the limit where the separation of the two stars is less than about 45 mas, so that the photocenter approximation works well. Unlike predict_astrometry_binary_in_terms_of_a0(), this function attempts to account for star-to-star difference in epoch astrometry noise. 
+    
+    ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
+    parallax (mas): the true parallax (i.e., 1/d)
+    pmra, pmdec: true proper motions in mas/yr
+    a0_mas: the photocenter semimajor axis 
+    period: orbital period in days
+    Tp: periastron time in days
+    ecc: eccentricity
+    omega: "big Omega" in radians
+    inc: inclination in radians, defined so that 0 or pi is face-on, and pi/2 is edge-on. 
+    w: "little omega" in radians
+    phot_g_mean_mag: G-band magnitude 
+    data_release: 'dr3', 'dr4', or 'dr5'
+    c_funcs: from read_in_C_functions()
+    '''
+    
+    t = get_gost_one_position(ra, dec, data_release=data_release)
+    
+    # reject a random 10%
+    t = t[np.random.uniform(0, 1, len(t)) > 0.1]
+    psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
+    t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
+    
+    N_ccd_avg = 8
+    epoch_err_per_transit = get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+    epoch_err_per_transit_expect = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+
+    EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
+ 
+    A_pred = a0_mas*( np.cos(w)*np.cos(omega) - np.sin(w)*np.sin(omega)*np.cos(inc) )
+    B_pred = a0_mas*( np.cos(w)*np.sin(omega) + np.sin(w)*np.cos(omega)*np.cos(inc) )
+    F_pred = -a0_mas*( np.sin(w)*np.cos(omega) + np.cos(w)*np.sin(omega)*np.cos(inc) )
+    G_pred = -a0_mas*( np.sin(w)*np.sin(omega) - np.cos(w)*np.cos(omega)*np.cos(inc) )
+    
+    X = np.cos(EE) - ecc
+    Y = np.sqrt(1-ecc**2)*np.sin(EE)
+    
+    x, y = B_pred*X + G_pred*Y, A_pred*X + F_pred*Y   
+    delta_eta = (y*np.cos(psi) + x*np.sin(psi)) 
+    
+    Lambda_com = pmra*t_ast_yr*np.sin(psi) + pmdec*t_ast_yr*np.cos(psi) + parallax*plx_factor # barycenter motion
+    Lambda_pred = Lambda_com + delta_eta # binary motion
+
+    Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
+    Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
+    
+    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit_expect*np.ones(len(Lambda_pred))
+
+def get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag):
+    '''
+    this function adds a degree of complexity on top of al_uncertainty_per_ccd_interp()
+.   It uses empirical trends in ruwe with spatial coordinate to inflate/deflate the actual uncertainties
+    '''
+    
+    hpxs =  hp.ang2pix(16, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
+   
+    tmp = np.load(os.path.join(os.path.dirname(__file__), 'healpix_16_med_ruwe.npz'))
+    med_ruwe = tmp['med_ruwe']
+    tmp.close()
+    
+    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)
+    extranoise = (med_ruwe[hpxs] - 1) * 0.125 # 0.125 is the sky-averaged averaged sigma_eta at G = 12    
+    return epoch_err_per_transit + extranoise + 0.01*np.random.randn() 
+
 
 def get_a_mas(period, m1, m2, parallax):
     '''
