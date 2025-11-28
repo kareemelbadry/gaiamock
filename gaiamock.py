@@ -1108,11 +1108,11 @@ def generate_coordinates_at_a_given_distance_exponential_disk(d_min, d_max, N_st
     ra, dec, d_pc = ra[:N_stars], dec[:N_stars], d_pc[:N_stars]
     return ra, dec, d_pc, x[ok][:N_stars], y[ok][:N_stars], z[ok][:N_stars]
     
-def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True, ruwe_min=1.4, skip_acceleration = False):
+def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True, ruwe_min=1.4, skip_acceleration = False, hz_pc = 300):
     '''
     this function generates N_realizations realizations of a binary within a given distance range, for a fixed Porb, absolute magnitude, flux ratio, and eccentricity. Sky positions and orientations will be different for each realization. It generates epoch astrometry for each realization, and then fits that astrometry with the standard astrometric cascade. Finally, it reports what fraction of all realizations resulted in an orbital solution that passes all the DR3 cuts.  
     '''
-    ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = 300)
+    ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = hz_pc)
     l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
     
     if do_dust:
@@ -1148,13 +1148,70 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     accepted[ok] = passed_cuts
 
     print('%d out of %d solutions had insufficient visibility periods' % (np.sum(plx == 0), N_realizations) )    
-    print('%d out of %d solutions had ruwe < 1.4' % (np.sum(plx == -1), N_realizations) )
-    print('%d out of %d solutions got 9-parameter solutions' % (np.sum(plx == -9), N_realizations) )
-    print('%d out of %d solutions got 7-parameter solutions' % (np.sum(plx == -7), N_realizations) )
+    print('%d out of %d solutions had ruwe < %.2f' % (np.sum(plx == -1), N_realizations, ruwe_min) )
+    print('%d out of %d solutions got taken out of the cascade because a 9-parameter solution was tried' % (np.sum(plx == -9), N_realizations) )
+    print('%d of these would actually be published' % (np.sum( (plx == -9) & (sig_parallax > 20) )) )
+
+    print('%d out of %d solutions got taken out of the cascade because a 7-parameter solution was tried' % (np.sum(plx == -7), N_realizations) )
+    print('%d of these would actually be published' % (np.sum( (plx == -7) & (sig_parallax > 20) )) )
     print('%d out of %d solutions passed all cuts and got an orbital solution!' % (np.sum(accepted), N_realizations) )
     print('%d out of %d solutions got to orbital solutions but failed at least one cut. ' % (np.sum(~accepted & (plx > 0)), N_realizations) )
         
     return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted
+
+
+def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr4', do_dust = True, ruwe_min=1.4, skip_acceleration = True, hz_pc = 300, a0_over_error_min = 15, parallax_over_error_min = 5):
+    '''
+    This function is the same as simulate_many_realizations_of_a_single_binary(), except that it allows the user to input cuts on a0/a0_err, parallax_over_error, etc., that are different from those used in DR3. 
+    a0_over_error_min = 15 and parallax_over_error_min = 5 are reasonable limits for DR4 (lower than this will likely be dominated by spurious astrometric solutions)
+    '''
+    ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = hz_pc)
+    l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
+    
+    if do_dust:
+        import mwdust
+        combined19_ebv = mwdust.Combined19()
+        ebv = combined19_ebv(l_deg, b_deg, d_pc/1000)
+        A_G = 2.80*ebv
+    else: 
+        if d_min > 100:
+            print('you are ignoring dust. This is probably not a good idea at this distance. ')
+        A_G = np.zeros(N_realizations)
+ 
+    Tp = np.random.uniform(0, 1, N_realizations)*period
+    omega =  np.random.uniform(0, 2*np.pi, N_realizations) 
+    w = np.random.uniform(0, 2*np.pi, N_realizations)
+    inc_deg = np.degrees(np.arccos( np.random.uniform(-1, 1, N_realizations)))
+    phot_g_mean_mag = Mg_tot + 5*np.log10(d_pc/10) + A_G
+
+    
+    def search_mock_binary_worker(i):
+        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration)        
+        return result
+    
+    from joblib import Parallel, delayed
+    res = Parallel(n_jobs=joblib.cpu_count())(delayed(search_mock_binary_worker)(x) for x in range(N_realizations))
+
+    plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, fit_period, sig_period, phi_p, sig_phi_p, fit_ecc, sig_ecc, fit_inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, N_obs, F2, ruwe = np.array(res).T
+
+    plx_over_err, a0_over_err = plx/sig_parallax, a0_mas/sigma_a0_mas
+    
+    accepted, ok = np.zeros(len(plx), dtype=bool), fit_period > 0
+    passed_cuts = (a0_over_err[ok] > a0_over_error_min) & (plx_over_err[ok] > parallax_over_error_min) 
+    accepted[ok] = passed_cuts
+
+    print('%d out of %d solutions had insufficient visibility periods' % (np.sum(plx == 0), N_realizations) )    
+    print('%d out of %d solutions had ruwe < %.2f' % (np.sum(plx == -1), N_realizations, ruwe_min) )
+    print('%d out of %d solutions got taken out of the cascade because a 9-parameter solution was tried' % (np.sum(plx == -9), N_realizations) )
+    print('%d of these would actually be published' % (np.sum( (plx == -9) & (sig_parallax > 20) )) )
+
+    print('%d out of %d solutions got taken out of the cascade because a 7-parameter solution was tried' % (np.sum(plx == -7), N_realizations) )
+    print('%d of these would actually be published' % (np.sum( (plx == -7) & (sig_parallax > 20) )) )
+    print('%d out of %d solutions passed all cuts and got an orbital solution!' % (np.sum(accepted), N_realizations) )
+    print('%d out of %d solutions got to orbital solutions but failed at least one cut. ' % (np.sum(~accepted & (plx > 0)), N_realizations) )
+        
+    return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted
+
 
 def predict_radial_velocities(t_rvs_day, period, Tp, ecc, w, K, gamma, c_funcs):
     '''
