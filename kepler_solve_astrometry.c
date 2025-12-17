@@ -243,6 +243,106 @@ void get_chi2_astrometry(int n_obs, double *t_ast_yr, double *psi, double *plx_f
     gsl_vector_free(Cinv_ast_obs);
 }
 
+
+/*  This function is identical to get_chi2_astrometry(), except that it includes a prior on parallax. It is useful if you already know the distance you your binary, e.g. because it's in a cluster. The prior is parallax = pi0 \pm sig_pi. The array will be chi_array = chi2, ra_off, pmra, dec_off, pmdec, plx, B, G, A, F */
+void get_chi2_astrometry_parallax_prior(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double P, double phi_p, double ecc, double pi0, double sig_pi, double *chi2_array){
+    double xtol = 1e-10;
+    double Ei;
+    double Mi;
+    double X[n_obs];
+    double Y[n_obs]; 
+    double ivar[n_obs];
+    
+    gsl_matrix *M = gsl_matrix_calloc(n_obs, 9);
+    gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
+    
+    gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs);
+    gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
+    gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
+    gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
+    gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
+    gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
+
+    // Compute ivar and fill Cinv
+    for (int j = 0; j < n_obs; j++) {
+        ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
+        gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
+    }    
+    
+    for(int j = 0; j < n_obs; j++){
+        Mi = 2*PI*t_ast_yr[j]*365.25/P - phi_p;
+        Ei = solve_Kepler_equation(Mi, ecc, xtol);
+        
+        X[j] = cos(Ei) - ecc;
+        Y[j] = sqrt(1-ecc*ecc)*sin(Ei);
+    }
+      
+    for (int j = 0; j < n_obs; j++) {
+        gsl_matrix_set(M, j, 0, sin(psi[j]) );
+        gsl_matrix_set(M, j, 1, t_ast_yr[j] * sin(psi[j]) );
+        gsl_matrix_set(M, j, 2, cos(psi[j]) );
+        gsl_matrix_set(M, j, 3, t_ast_yr[j] * cos(psi[j]));
+        gsl_matrix_set(M, j, 4, plx_factor[j]);
+        gsl_matrix_set(M, j, 5, X[j] * sin(psi[j]) );
+        gsl_matrix_set(M, j, 6, Y[j] * sin(psi[j]) );
+        gsl_matrix_set(M, j, 7, X[j] * cos(psi[j]));
+        gsl_matrix_set(M, j, 8, Y[j] * cos(psi[j]));
+    }
+    gsl_matrix_transpose_memcpy(Mt, M);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, Mt, Cinv, 0.0, temp);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, temp, M, 0.0, MtCinvM);
+    
+    gsl_vector *Cinv_ast_obs = gsl_vector_alloc(n_obs); // Allocate vector for the result of Cinv @ ast_obs
+    gsl_vector_view ast_obs_view = gsl_vector_view_array(ast_obs, n_obs); // Create a vector view of ast_obs
+    gsl_blas_dgemv(CblasNoTrans, 1.0, Cinv, &ast_obs_view.vector, 0.0, Cinv_ast_obs);
+    gsl_blas_dgemv(CblasNoTrans, 1.0, Mt, Cinv_ast_obs, 0.0, MtCinvY);
+    
+    // add the parallax prior
+    if (sig_pi > 0) {
+        const int k = 4;                      // parallax coefficient index (column 4 is plx_factor)
+        const double w = 1.0/(sig_pi*sig_pi);
+        gsl_matrix_set(MtCinvM, k, k, gsl_matrix_get(MtCinvM, k, k) + w);
+        gsl_vector_set(MtCinvY, k, gsl_vector_get(MtCinvY, k) + w*pi0);
+    }
+    
+    gsl_linalg_HH_solve(MtCinvM, MtCinvY, mu);
+    gsl_blas_dgemv(CblasNoTrans, 1.0, M, mu, 0.0, Lambda_pred);
+    
+
+    double chi2 = 0.0; 
+    for (int j = 0; j < n_obs; j++) {
+        double pred = gsl_vector_get(Lambda_pred, j);
+        double obs = ast_obs[j];
+        double err = ast_err[j];
+        chi2 += ((pred - obs) * (pred - obs)) / (err * err);
+    }
+    
+    // add a penalty for the parallax prior 
+    if (sig_pi > 0) {
+        double pi_hat = gsl_vector_get(mu, 4);
+        chi2 += (pi_hat - pi0)*(pi_hat - pi0)/(sig_pi*sig_pi);
+    }
+    
+    chi2_array[0] = chi2;
+     
+    for (int j = 1; j < 10; j++) {
+        chi2_array[j] = gsl_vector_get(mu, j-1);
+    }
+
+
+    // Cleanup
+    gsl_matrix_free(M);
+    gsl_matrix_free(Mt);
+    gsl_matrix_free(Cinv);
+    gsl_matrix_free(MtCinvM);
+    gsl_vector_free(MtCinvY);
+    gsl_vector_free(mu);
+    gsl_vector_free(Lambda_pred);
+    gsl_matrix_free(temp);
+    gsl_vector_free(Cinv_ast_obs);
+}
+
+
 /*  This function takes a single set of (P, phi_p, ecc). It then solves for the best-fit linear parameters and predicts the epoch astrometry at time t_ast_yr, and calculates the corresponding chi2. n_obs is length of the observations array.
 the first element of chi2_array will be the chi2. The next 9 elements are the best-fit linear parameters for this (P, phi_p, ecc). The last 9 are are the uncertainties on the best-fit linear parameter (only accounting for the uncertainty associated with the matrix inversion.) */
 void get_chi2_astrometry_and_uncertainties(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double P, double phi_p, double ecc, double *chi2_array){
@@ -608,6 +708,243 @@ void run_astfit(double* t_ast_yr, double* psi, double *plx_factor, double* ast_o
 
     free(xbest);
 }
+
+
+/* This is identical to fun_astfit(), except that it includes a parallax prior of parallax = pi0 +/- sig_pi
+*/ 
+
+void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, double pi0, double sig_pi) {
+    double eps = 1e-5; // all the tunable parameters are taken from RVFIT ( https://arxiv.org/abs/1505.04767)
+    int Neps = 5;
+    int Nterm = 20;
+    int npar = 3;
+
+    double* fbestlist = (double*)malloc(Neps * sizeof(double));
+    for (int i = 0; i < Neps; i++) {
+        fbestlist[i] = 1.0;
+    }
+    int nrean = 0;
+
+    double mean_err = 0.0;
+    for (int i = 0; i < n_obs; i++) {
+        mean_err += ast_err[i];
+    }
+    mean_err /= n_obs;
+
+    double chislimit = 0.0;
+    for (int i = 0; i < n_obs; i++) {
+        chislimit += pow(mean_err / ast_err[i], 2);
+    }
+
+    double* x = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        x[i] = (U[i] + L[i]) / 2.0; 
+    }
+
+    double* chi2_array = (double*)malloc(10 * sizeof(double));
+    get_chi2_astrometry_parallax_prior(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, x[0], x[1], x[2], pi0, sig_pi, chi2_array);
+    double f = chi2_array[0];
+    double* xbest = (double*)malloc(npar * sizeof(double));
+    double fbest = f;
+    for (int i = 0; i < npar; i++) {
+        xbest[i] = x[i];
+    }
+
+    int ka = 0;
+    double Ta0 = f;
+    double Ta = Ta0;
+    int nacep = 0;
+
+    double* kgen = (double*)calloc(npar, sizeof(double));
+    double* Tgen0 = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        Tgen0[i] = 1.0;
+    }
+    double* Tgen = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        Tgen[i] = Tgen0[i];
+    }
+
+    double c = 20.0;
+    int Na = 1000;
+    int Ngen = 10000;
+    double* delta = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        delta[i] = fabs(U[i] - L[i]) * 1e-8;
+    }
+
+    double acep = 0.25;
+    int ntest = 100;
+    double* ftest = (double*)calloc(ntest, sizeof(double));
+
+    for (int j = 0; j < ntest; j++) {
+        double xnew[npar];
+        generate_xnew_from_generation_temperatures(x, L, U, Tgen, npar, xnew);
+        get_chi2_astrometry_parallax_prior(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], pi0, sig_pi, chi2_array);
+        ftest[j] = chi2_array[0];
+        if (ftest[j] < fbest) {
+            fbest = ftest[j];
+            for (int i = 0; i < npar; i++) {
+                xbest[i] = xnew[i];
+            }
+        }
+    }
+
+    double* dftest = (double*)malloc((ntest - 1) * sizeof(double));
+    for (int i = 0; i < ntest - 1; i++) {
+        dftest[i] = ftest[i + 1] - ftest[i];
+    }
+
+    double avdftest = 0.0;
+    for (int i = 0; i < ntest - 1; i++) {
+        avdftest += fabs(dftest[i]);
+    }
+    avdftest /= (ntest - 1);
+
+    Ta0 = avdftest / log(1.0 / acep - 1.0);
+
+    int repeat = 1;
+    while (repeat) {
+        for (int j = 0; j < Ngen; j++) {
+            int flag_acceptance = 0;
+            double xnew[npar];
+            generate_xnew_from_generation_temperatures(x, L, U, Tgen, npar, xnew);
+            get_chi2_astrometry_parallax_prior(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], pi0, sig_pi, chi2_array);
+            double fnew = chi2_array[0];
+
+            if (fnew <= f) {
+                flag_acceptance = 1;
+            } else {
+                double test = (fnew - f) / Ta;
+                double Pa = (test > 20) ? 0 : 1.0 / (1.0 + exp(test));
+                if (random_double() <= Pa) {
+                    flag_acceptance = 1;
+                }
+            }
+
+            if (flag_acceptance) {
+                if (fnew < fbest) {
+                    fbest = fnew;
+                    for (int i = 0; i < npar; i++) {
+                        xbest[i] = xnew[i];
+                    }
+                    nrean = 0;
+                }
+                nacep++;
+                ka++;
+                for (int i = 0; i < npar; i++) {
+                    x[i] = xnew[i];
+                }
+                f = fnew;
+            }
+
+            if (nacep >= Na) {
+                double* s = (double*)calloc(npar, sizeof(double));
+                for (int g = 0; g < npar; g++) {
+                    double* ee = (double*)calloc(npar, sizeof(double));
+                    ee[g] = delta[g];
+                    get_chi2_astrometry_parallax_prior(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], pi0, sig_pi, chi2_array);
+                    double fbestdelta = chi2_array[0];
+                    s[g] = fabs((fbestdelta - fbest) / delta[g]);
+                    free(ee);
+                }
+
+                for (int i = 0; i < npar; i++) {
+                    if (s[i] == 0.0) {
+                        double min_nonzero = 1e10;
+                        for (int j = 0; j < npar; j++) {
+                            if (s[j] != 0.0 && s[j] < min_nonzero) {
+                                min_nonzero = s[j];
+                            }
+                        }
+                        s[i] = min_nonzero;
+                    }
+                }
+
+                double smax = 0.0;
+                for (int i = 0; i < npar; i++) {
+                    if (s[i] > smax) {
+                        smax = s[i];
+                    }
+                }
+
+                for (int i = 0; i < npar; i++) {
+                    Tgen[i] = Tgen[i] * (smax / s[i]);
+                    kgen[i] = pow(log(Tgen0[i] / Tgen[i]) / c, npar);
+                    kgen[i] = fabs(kgen[i]);
+                }
+
+                Ta0 = f;
+                Ta = fbest;
+                ka = pow(log(Ta0 / Ta) / c, npar);
+
+                int stop = 0;
+                for (int i = 0; i < npar; i++) {
+                    if (Tgen[i] == 0) {
+                        stop = 1;
+                        break;
+                    }
+                }
+                if (stop) {
+                    repeat = 0;
+                    break;
+                }
+
+                nacep = 0;
+                nrean++;
+                free(s);
+            }
+        }
+
+        for (int i = 0; i < npar; i++) {
+            kgen[i] += 1;
+            Tgen[i] = Tgen0[i] * exp(-c * pow(kgen[i], 1.0 / npar));
+        }
+
+        ka += 1;
+        Ta = Ta0 * exp(-c * pow(ka, 1.0 / npar));
+
+        for (int i = 1; i < Neps; i++) {
+            fbestlist[i - 1] = fbestlist[i];
+        }
+        fbestlist[Neps - 1] = fbest;
+
+        int count = 0;
+        for (int i = 0; i < Neps - 1; i++) {
+            if (fabs(fbestlist[i + 1] - fbestlist[i]) < eps) {
+                count++;
+            }
+        }
+        if (count == Neps - 1) {
+            // printf("%f %f\n", fbest, chislimit);
+            if (fbest < chislimit) {
+                repeat = 0;
+            } else {
+                Ta = Ta0;
+            }
+        }
+        if (nrean >= Nterm) {
+            repeat = 0;
+        }
+    }
+
+    free(fbestlist);
+    free(kgen);
+    free(Tgen0);
+    free(Tgen);
+    free(delta);
+    free(ftest);
+    free(dftest);
+    free(x);
+    free(chi2_array);
+
+    for (int i = 0; i < npar; i++) {
+        results[i] = xbest[i];
+    }
+
+    free(xbest);
+}
+
 
 /* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc. 
 */

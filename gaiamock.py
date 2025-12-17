@@ -28,11 +28,13 @@ def read_in_C_functions():
         raise ValueError('You need to compile kepler_solve_astrometry.c!')
     return c_funcs
     
-def get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, c_funcs, reject_outlier=False):
+def get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, c_funcs, reject_outlier=False, 
+    parallax_priors = (None, -1)):
     '''
     this function takes arrays of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err), and a set of (P, phi_p, ecc), solves for the best-fit linear parameters, predicts the epoch astrometry, and calculates the chi2. It also returns the best-fit vector of linear parameters. This uses the compiled c function from kepler_solve_astrometry.so. 
     c_funcs comes from read_in_C_functions()
     returns chi2 and an array of 9 linear parameters
+    if 
     '''
     t_ast_yr_double = t_ast_yr.astype(np.double)
     psi_double = psi.astype(np.double)
@@ -44,8 +46,11 @@ def get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, 
     if reject_outlier:
         c_funcs.get_chi2_astrometry_reject_outliers(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_void_p(chi2_array.ctypes.data))
     else:
-        c_funcs.get_chi2_astrometry(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_void_p(chi2_array.ctypes.data))
-        
+        if parallax_priors[0] is None:
+            c_funcs.get_chi2_astrometry(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_void_p(chi2_array.ctypes.data))
+        else:
+            c_funcs.get_chi2_astrometry_parallax_prior(ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_double(parallax_priors[0]), ctypes.c_double(parallax_priors[1]), ctypes.c_void_p(chi2_array.ctypes.data))
+            
         
     chi2 = chi2_array[0]
     mu = chi2_array[1:] # ra_off, pmra, dec_off, pmdec, plx, B, G, A, F
@@ -124,10 +129,35 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         c_funcs.run_astfit(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)))    
     return results_array
     
+    
+def fit_orbital_solution_nonlinear_with_parallax_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
+    L = np.array([10, 0, 0]), U = np.array([1e4, 2*np.pi, 0.99]), pi0 = 1, sig_pi = 1e4):
+    '''
+    this function takes arrays of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err) and solves for the best-fit tuple of nonlinear parameters (P, phi_p, e) via adaptive simulated annealing.  This uses the compiled c function from kepler_solve_astrometry.so. 
+    c_funcs comes from read_in_C_functions()
+    L and U are arrays giving the lower and upper limits on each of the 3 nonlinear parameters. 
+    returns (P, phi_p, e)
+    this version is like fit_orbital_solution_nonlinear(), except it includes a prior of parallax = pi0 +/- sig_pi. 
+    '''
+
+    t_ast_yr_double = t_ast_yr.astype(np.double)
+    psi_double = psi.astype(np.double)
+    plx_factor_double = plx_factor.astype(np.double)
+    ast_obs_double = ast_obs.astype(np.double)
+    ast_err_double = ast_err.astype(np.double)
+    L_double = L.astype(np.double)
+    U_double = U.astype(np.double)
+    results_array = np.empty(3, dtype = np.double)
+
+    c_funcs.run_astfit_parallax_prior(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data), ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_double(pi0), ctypes.c_double(sig_pi))    
+    return results_array
+
+    
 def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, p0, reject_outlier=False,
-    nburn = 2500, nstep = 2500, nwalkers=64):
+    nburn = 2500, nstep = 2500, nwalkers=64, parallax_priors = (None, -1)):
     '''
     this function takes a starting guess p0 = [ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G] and runs an MCMC 
+    if parallax_priors[0] is not None, add a parallax prior of parallax = parallax_priors[0] +/- parallax_priors[1]
     '''
     import emcee
     
@@ -141,6 +171,9 @@ def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_
         
     def ln_posterior(theta):
         lnprior = ln_flat_prior(theta = theta, theta_bounds = bounds)
+        if parallax_priors[0] is not None:
+            lnprior += -0.5*(theta[2]-parallax_priors[0])**2/parallax_priors[1]**2
+        
         if np.isfinite(lnprior):
             lnlikelihood = ln_likelihood(theta)
         else:

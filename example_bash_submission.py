@@ -28,8 +28,8 @@ dr = 'dr3'
 
 all_prob_BH1 = []
 for dist in dist_range_bh1:
-    ra, dec, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(dist_pc = dist*1000, period = period, Mg_tot = Mg_tot, 
-                    f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
+    
+    ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(d_min=900*dist, d_max = 1100*dist, period = period, Mg_tot = Mg_tot, f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
     prob = np.sum(accept)/len(accept)
     print('found probability!', dist, prob)
     all_prob_BH1.append(prob)
@@ -48,8 +48,7 @@ N = 500
 
 all_prob_BH2 = []
 for dist in dist_range_bh2:
-    ra, dec, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(dist_pc = dist*1000, period = period, Mg_tot = Mg_tot, 
-                    f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
+    ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(d_min=900*dist, d_max = 1100*dist, period = period, Mg_tot = Mg_tot, f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
     prob = np.sum(accept)/len(accept)
     print('found probability!', dist, prob)
     all_prob_BH2.append(prob)
@@ -69,8 +68,7 @@ N = 500
 
 all_prob_NS1 = []
 for dist in dist_range_ns1:
-    ra, dec, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(dist_pc = dist*1000, period = period, Mg_tot = Mg_tot, 
-                    f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
+    ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(d_min=900*dist, d_max = 1100*dist, period = period, Mg_tot = Mg_tot, f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
     prob = np.sum(accept)/len(accept)
     print('found probability!', dist, prob)
     all_prob_NS1.append(prob)
@@ -90,8 +88,7 @@ N = 500
 
 all_prob_BH3 = []
 for dist in dist_range_bh3:
-    ra, dec, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(dist_pc = dist*1000, period = period, Mg_tot = Mg_tot, 
-                    f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
+    ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, inc_deg, accept = gaiamock.simulate_many_realizations_of_a_single_binary(d_min=900*dist, d_max = 1100*dist, period = period, Mg_tot = Mg_tot, f = f, m1 = m1, m2 = m2, ecc = ecc, N_realizations = N, data_release=dr)
     prob = np.sum(accept)/len(accept)
     print('found probability!', dist, prob)
     all_prob_BH3.append(prob)
