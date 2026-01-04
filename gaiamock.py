@@ -152,14 +152,41 @@ def fit_orbital_solution_nonlinear_with_parallax_prior(t_ast_yr, psi, plx_factor
     c_funcs.run_astfit_parallax_prior(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data), ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_double(pi0), ctypes.c_double(sig_pi))    
     return results_array
 
+def fit_orbital_solution_nonlinear_with_eccentricity_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
+    L = np.array([10, 0, 1e-6]), U = np.array([1e4, 2*np.pi, 0.99]), ecc_a = 1, ecc_b = 3):
+    '''
+    this function takes arrays of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err) and solves for the best-fit tuple of nonlinear parameters (P, phi_p, e) via adaptive simulated annealing.  This uses the compiled c function from kepler_solve_astrometry.so. 
+    c_funcs comes from read_in_C_functions()
+    L and U are arrays giving the lower and upper limits on each of the 3 nonlinear parameters. 
+    returns (P, phi_p, e)
+    this version is like fit_orbital_solution_nonlinear(), except it includes a prior of eccentricity = beta(ecc_a, ecc_b). 
+    '''
+
+    t_ast_yr_double = t_ast_yr.astype(np.double)
+    psi_double = psi.astype(np.double)
+    plx_factor_double = plx_factor.astype(np.double)
+    ast_obs_double = ast_obs.astype(np.double)
+    ast_err_double = ast_err.astype(np.double)
+    L_double = L.astype(np.double)
+    U_double = U.astype(np.double)
+    results_array = np.empty(3, dtype = np.double)
+
+    c_funcs.run_astfit_eccentricity_prior(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data), ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_double(ecc_a), ctypes.c_double(ecc_b))    
+    return results_array
+
     
 def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, p0, reject_outlier=False,
-    nburn = 2500, nstep = 2500, nwalkers=64, parallax_priors = (None, -1)):
+    nburn = 2500, nstep = 2500, nwalkers=64, parallax_priors = (None, -1), eccentricity_prior = False):
     '''
     this function takes a starting guess p0 = [ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G] and runs an MCMC 
     if parallax_priors[0] is not None, add a parallax prior of parallax = parallax_priors[0] +/- parallax_priors[1]
+    if eccentricity_prior = True, use a beta function prior borrowed from the Joker 
     '''
     import emcee
+    from scipy.special import gammaln
+    a, b = 1, 3
+    ln_norm = gammaln(a + b) - gammaln(a) - gammaln(b)
+    
     
     bound_low = [None, None, None, None, None, 0, 0, 0, None, None, None, None]
     bound_high = [None, None, None, None, None, None, 1, 2*np.pi, None, None, None, None]
@@ -173,6 +200,11 @@ def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_
         lnprior = ln_flat_prior(theta = theta, theta_bounds = bounds)
         if parallax_priors[0] is not None:
             lnprior += -0.5*(theta[2]-parallax_priors[0])**2/parallax_priors[1]**2
+        if eccentricity_prior:
+            if theta[6] <= 0.0 or theta[6] >= 1.0:
+                return -np.inf
+            else:
+                lnprior += ln_norm + (a - 1.0) * np.log(theta[6]) + (b - 1.0) * np.log(1.0 - theta[6])
         
         if np.isfinite(lnprior):
             lnlikelihood = ln_likelihood(theta)
@@ -758,7 +790,7 @@ def plot_residuals_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array
     ax[1].set_ylabel('residual (7 par)', fontsize=20)
 
     
-def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, p0, c_funcs, binned=True, reject_outlier=False):
+def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, p0, c_funcs, binned=True, reject_outlier=False, parallax_priors = (None, -1), eccentricity_priors = (None, -1)):
     '''
     This function calculates the Hessian matrix, approximated from the Jacobian, at a coordinate in 12-dimensional parameter space p0. 
     p0 = (ra_offset, dec_offset, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G)
@@ -769,6 +801,10 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
         uncertainties: 12-parameter uncertainties 
         a0, sigma_a0: photocenter ellipse and uncertainty, calculated following Halbwachs+2023
         inc_deg: inclination in degrees, calculated following Halbwachs+2023
+    
+    if parallax_priors[0] is not None, this will add a Gaussian prior parallax = parallax_priors[0] +/- parallax_priors[1]
+    if eccentricity_priors[0] is not None, this will add a prior ecc = beta(eccentricity_priors[0], eccentricity_priors[1]). 
+
     '''
     
     def resid_func(theta):
@@ -789,7 +825,22 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
         return J
         
     J = jacobian(p0)    
-    cov_x = np.linalg.inv(np.dot(J.T, J))  
+    JTJ = J.T @ J
+    
+    # --- Gaussian prior on parallax ---
+    pi0, sig_pi = parallax_priors
+    if (pi0 is not None) and (sig_pi > 0):
+        JTJ[2, 2] += 1.0 / (sig_pi ** 2) # 2 is the parallax 
+    
+    # --- beta prior on the eccentricity --- 
+    ecc_a, ecc_b = eccentricity_priors
+    if (ecc_a is not None) and (ecc_a >= 1) and (ecc_b > 1):
+        ecc = np.clip(p0[6], 1e-6, 1.0 - 1e-6)
+        H_e = (ecc_a - 1.0) / (ecc**2) + (ecc_b - 1.0) / ((1.0 - ecc)**2)
+        JTJ[6, 6] += H_e
+
+    cov_x = np.linalg.inv(JTJ)
+    
 
     if not np.sum(~np.isfinite(cov_x)):
         
@@ -977,6 +1028,151 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     # lots of stuff that can be useful to return
     return_array = [plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, period, sig_period, phi_p, sig_phi_p, ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, len(t_ast_yr), F2, ruwe]
     return return_array
+
+
+def fit_full_astrometric_cascade_with_parallax_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, ruwe_min = 1.25, skip_acceleration=True, P_min = 100, parallax_priors = (0.1, 0.01)):
+    '''
+    this function is nearly the same as fit_full_astrometric_cascade(), but it includes prior on the parallax of parallax = parallax_priors[0] +/- parallax_priors[1]. This prior is only used in the nonlinear orbital solution. 
+    '''    
+    Nret = 23 # number of arguments to return 
+    N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
+    if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
+        return Nret*[0]
+    
+    # check 5-parameter solution 
+    ruwe, mu, sigma_mu = check_ruwe(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err)
+    if ruwe < ruwe_min:
+        res =  Nret*[-1] # set most return arguments to -1, but save a few parameters for convenience 
+        res[1] = ruwe 
+        res[2] = mu[-1]
+        res[3] = sigma_mu[-1]
+        return res
+        
+    if c_funcs is None:
+        c_funcs = read_in_C_functions()
+    
+    # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
+    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    plx_over_err9 = mu[-1]/sigma_mu[-1]
+    if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05) and (not skip_acceleration):
+        res =  Nret*[-9]  # set most return arguments to -9, but save a few parameters for convenience 
+        res[1] = s_9par 
+        res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
+        res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
+        res[6], res[7] = mu[3], sigma_mu[3] # pmra_ddot
+        res[8], res[9] = mu[6], sigma_mu[6] # pmdec_dot
+        res[10], res[11] = mu[7], sigma_mu[7] # pmdec_ddot
+        res[12] = ruwe 
+        res[13] = F2_9par 
+        return res
+    
+    # mu is ra, pmra, pmra_dot, dec, pmdec, pmdec_dot, plx
+    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    plx_over_err7 = mu[-1]/sigma_mu[-1]
+    if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05) and (not skip_acceleration):
+        res =  Nret*[-7]
+        res[1] = s_7par
+        res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
+        res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
+        res[6], res[7] = mu[5], sigma_mu[5] # pmdec_dot
+        res[8] = ruwe
+        res[9] = F2_7par
+        return res
+
+    res = fit_orbital_solution_nonlinear_with_parallax_prior(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, L = np.array([P_min, 0, 0]), pi0 = parallax_priors[0], sig_pi = parallax_priors[1])
+    
+    # get the linear parameters 
+    period, phi_p, ecc = res
+    chi2, mu_linear = get_astrometric_chi2(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, P = period, phi_p = phi_p, ecc = ecc, c_funcs=c_funcs, parallax_priors = parallax_priors)
+    ra_off, pmra, dec_off, pmdec, plx, B, G, A, F = mu_linear
+    p0 = [ra_off, dec_off, plx, pmra, pmdec, period, ecc, phi_p, A, B, F, G]
+    
+    # get some uncertainties 
+    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=True, reject_outlier=False, parallax_priors = parallax_priors)
+    sig_ra,sig_dec,sig_parallax,sig_pmra,sig_pmdec,sig_period,sig_ecc,sig_phi_p,sig_A,sig_B, sig_F,sig_G = errors
+    
+    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
+    chi2_red_binned = chi2/nu
+    
+    F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
+    a0_over_err, parallax_over_error = a0_mas/sigma_a0_mas, plx/sig_parallax
+        
+    # lots of stuff that can be useful to return
+    return_array = [plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, period, sig_period, phi_p, sig_phi_p, ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, len(t_ast_yr), F2, ruwe]
+    return return_array
+
+
+def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, ruwe_min = 1.25, skip_acceleration=True, P_min = 10, eccentricity_priors = (1.0, 3.0)):
+    '''
+    this function is nearly the same as fit_full_astrometric_cascade(), but it includes prior on the eccentricity of ecc = beta(eccentricity_priors[0], eccentricity_priors[1]). This prior is only used in the nonlinear orbital solution. 
+    '''    
+    Nret = 23 # number of arguments to return 
+    N_visibility_periods = int(np.sum( np.diff(t_ast_yr*365.25) > 4) + 1)
+    if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
+        return Nret*[0]
+    
+    # check 5-parameter solution 
+    ruwe, mu, sigma_mu = check_ruwe(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err)
+    if ruwe < ruwe_min:
+        res =  Nret*[-1] # set most return arguments to -1, but save a few parameters for convenience 
+        res[1] = ruwe 
+        res[2] = mu[-1]
+        res[3] = sigma_mu[-1]
+        return res
+        
+    if c_funcs is None:
+        c_funcs = read_in_C_functions()
+    
+    # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
+    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    plx_over_err9 = mu[-1]/sigma_mu[-1]
+    if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05) and (not skip_acceleration):
+        res =  Nret*[-9]  # set most return arguments to -9, but save a few parameters for convenience 
+        res[1] = s_9par 
+        res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
+        res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
+        res[6], res[7] = mu[3], sigma_mu[3] # pmra_ddot
+        res[8], res[9] = mu[6], sigma_mu[6] # pmdec_dot
+        res[10], res[11] = mu[7], sigma_mu[7] # pmdec_ddot
+        res[12] = ruwe 
+        res[13] = F2_9par 
+        return res
+    
+    # mu is ra, pmra, pmra_dot, dec, pmdec, pmdec_dot, plx
+    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    plx_over_err7 = mu[-1]/sigma_mu[-1]
+    if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05) and (not skip_acceleration):
+        res =  Nret*[-7]
+        res[1] = s_7par
+        res[2], res[3] = mu[-1], sigma_mu[-1] # parallax
+        res[4], res[5] = mu[2], sigma_mu[2] # pmra_dot
+        res[6], res[7] = mu[5], sigma_mu[5] # pmdec_dot
+        res[8] = ruwe
+        res[9] = F2_7par
+        return res
+
+    res = fit_orbital_solution_nonlinear_with_eccentricity_prior(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, L = np.array([P_min, 0, 0]), ecc_a = eccentricity_priors[0], ecc_b = eccentricity_priors[1])
+    
+    # get the linear parameters 
+    period, phi_p, ecc = res
+    chi2, mu_linear = get_astrometric_chi2(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, P = period, phi_p = phi_p, ecc = ecc, c_funcs=c_funcs)
+    ra_off, pmra, dec_off, pmdec, plx, B, G, A, F = mu_linear
+    p0 = [ra_off, dec_off, plx, pmra, pmdec, period, ecc, phi_p, A, B, F, G]
+    
+    # get some uncertainties 
+    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=True, reject_outlier=False, eccentricity_priors = eccentricity_priors)
+    sig_ra,sig_dec,sig_parallax,sig_pmra,sig_pmdec,sig_period,sig_ecc,sig_phi_p,sig_A,sig_B, sig_F,sig_G = errors
+    
+    Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
+    chi2_red_binned = chi2/nu
+    
+    F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
+    a0_over_err, parallax_over_error = a0_mas/sigma_a0_mas, plx/sig_parallax
+        
+    # lots of stuff that can be useful to return
+    return_array = [plx, sig_parallax, A, sig_A, B, sig_B, F, sig_F, G, sig_G, period, sig_period, phi_p, sig_phi_p, ecc, sig_ecc, inc_deg, a0_mas, sigma_a0_mas, N_visibility_periods, len(t_ast_yr), F2, ruwe]
+    return return_array
+
 
 
 def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False, ruwe_min = 1.4, skip_acceleration=False):

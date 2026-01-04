@@ -71,6 +71,15 @@ void predict_radial_velocties(int n, double *mjds, double *RVs, double P, double
     }
 }
 
+/* This is a beta function, which we occasionally use for an eccentricity prior */
+
+static inline double log_beta_prior(double x, double a, double b) {
+    if (x <= 0.0 || x >= 1.0) return -INFINITY;
+
+    const double logB = lgamma(a) + lgamma(b) - lgamma(a + b);
+    return (a - 1.0) * log(x) + (b - 1.0) * log1p(-x) - logB;
+}
+
 
 /* This function takes a length-12 theta array:
 theta_array = (ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G) 
@@ -710,7 +719,243 @@ void run_astfit(double* t_ast_yr, double* psi, double *plx_factor, double* ast_o
 }
 
 
-/* This is identical to fun_astfit(), except that it includes a parallax prior of parallax = pi0 +/- sig_pi
+/* This is identical to run_astfit(), except that it includes an eccentricity prior of ecc ~ beta(ecc, ecc_a, ecc_b) */
+
+void run_astfit_eccentricity_prior(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, double ecc_a, double ecc_b) {
+    double eps = 1e-5; // all the tunable parameters are taken from RVFIT ( https://arxiv.org/abs/1505.04767)
+    int Neps = 5;
+    int Nterm = 20;
+    int npar = 3;
+
+    double* fbestlist = (double*)malloc(Neps * sizeof(double));
+    for (int i = 0; i < Neps; i++) {
+        fbestlist[i] = 1.0;
+    }
+    int nrean = 0;
+
+    double mean_err = 0.0;
+    for (int i = 0; i < n_obs; i++) {
+        mean_err += ast_err[i];
+    }
+    mean_err /= n_obs;
+
+    double chislimit = 0.0;
+    for (int i = 0; i < n_obs; i++) {
+        chislimit += pow(mean_err / ast_err[i], 2);
+    }
+
+    double* x = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        x[i] = (U[i] + L[i]) / 2.0; 
+    }
+
+    double* chi2_array = (double*)malloc(10 * sizeof(double));
+    get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, x[0], x[1], x[2], chi2_array);
+    double f = chi2_array[0] - 2.0 * log_beta_prior(x[2], ecc_a, ecc_b);
+    double* xbest = (double*)malloc(npar * sizeof(double));
+    double fbest = f;
+    for (int i = 0; i < npar; i++) {
+        xbest[i] = x[i];
+    }
+
+    int ka = 0;
+    double Ta0 = f;
+    double Ta = Ta0;
+    int nacep = 0;
+
+    double* kgen = (double*)calloc(npar, sizeof(double));
+    double* Tgen0 = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        Tgen0[i] = 1.0;
+    }
+    double* Tgen = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        Tgen[i] = Tgen0[i];
+    }
+
+    double c = 20.0;
+    int Na = 1000;
+    int Ngen = 10000;
+    double* delta = (double*)malloc(npar * sizeof(double));
+    for (int i = 0; i < npar; i++) {
+        delta[i] = fabs(U[i] - L[i]) * 1e-8;
+    }
+
+    double acep = 0.25;
+    int ntest = 100;
+    double* ftest = (double*)calloc(ntest, sizeof(double));
+
+    for (int j = 0; j < ntest; j++) {
+        double xnew[npar];
+        generate_xnew_from_generation_temperatures(x, L, U, Tgen, npar, xnew);
+        get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], chi2_array);
+        ftest[j] = chi2_array[0] - 2.0 * log_beta_prior(xnew[2], ecc_a, ecc_b);
+        if (ftest[j] < fbest) {
+            fbest = ftest[j];
+            for (int i = 0; i < npar; i++) {
+                xbest[i] = xnew[i];
+            }
+        }
+    }
+
+    double* dftest = (double*)malloc((ntest - 1) * sizeof(double));
+    for (int i = 0; i < ntest - 1; i++) {
+        dftest[i] = ftest[i + 1] - ftest[i];
+    }
+
+    double avdftest = 0.0;
+    for (int i = 0; i < ntest - 1; i++) {
+        avdftest += fabs(dftest[i]);
+    }
+    avdftest /= (ntest - 1);
+
+    Ta0 = avdftest / log(1.0 / acep - 1.0);
+
+    int repeat = 1;
+    while (repeat) {
+        for (int j = 0; j < Ngen; j++) {
+            int flag_acceptance = 0;
+            double xnew[npar];
+            generate_xnew_from_generation_temperatures(x, L, U, Tgen, npar, xnew);
+            get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], chi2_array);
+            double fnew = chi2_array[0] - 2.0 * log_beta_prior(xnew[2], ecc_a, ecc_b);
+
+            if (fnew <= f) {
+                flag_acceptance = 1;
+            } else {
+                double test = (fnew - f) / Ta;
+                double Pa = (test > 20) ? 0 : 1.0 / (1.0 + exp(test));
+                if (random_double() <= Pa) {
+                    flag_acceptance = 1;
+                }
+            }
+
+            if (flag_acceptance) {
+                if (fnew < fbest) {
+                    fbest = fnew;
+                    for (int i = 0; i < npar; i++) {
+                        xbest[i] = xnew[i];
+                    }
+                    nrean = 0;
+                }
+                nacep++;
+                ka++;
+                for (int i = 0; i < npar; i++) {
+                    x[i] = xnew[i];
+                }
+                f = fnew;
+            }
+
+            if (nacep >= Na) {
+                double* s = (double*)calloc(npar, sizeof(double));
+                for (int g = 0; g < npar; g++) {
+                    double* ee = (double*)calloc(npar, sizeof(double));
+                    ee[g] = delta[g];
+                    get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], chi2_array);
+                    double fbestdelta = chi2_array[0] - 2.0 * log_beta_prior(xnew[2], ecc_a, ecc_b);
+                    s[g] = fabs((fbestdelta - fbest) / delta[g]);
+                    free(ee);
+                }
+
+                for (int i = 0; i < npar; i++) {
+                    if (s[i] == 0.0) {
+                        double min_nonzero = 1e10;
+                        for (int j = 0; j < npar; j++) {
+                            if (s[j] != 0.0 && s[j] < min_nonzero) {
+                                min_nonzero = s[j];
+                            }
+                        }
+                        s[i] = min_nonzero;
+                    }
+                }
+
+                double smax = 0.0;
+                for (int i = 0; i < npar; i++) {
+                    if (s[i] > smax) {
+                        smax = s[i];
+                    }
+                }
+
+                for (int i = 0; i < npar; i++) {
+                    Tgen[i] = Tgen[i] * (smax / s[i]);
+                    kgen[i] = pow(log(Tgen0[i] / Tgen[i]) / c, npar);
+                    kgen[i] = fabs(kgen[i]);
+                }
+
+                Ta0 = f;
+                Ta = fbest;
+                ka = pow(log(Ta0 / Ta) / c, npar);
+
+                int stop = 0;
+                for (int i = 0; i < npar; i++) {
+                    if (Tgen[i] == 0) {
+                        stop = 1;
+                        break;
+                    }
+                }
+                if (stop) {
+                    repeat = 0;
+                    break;
+                }
+
+                nacep = 0;
+                nrean++;
+                free(s);
+            }
+        }
+
+        for (int i = 0; i < npar; i++) {
+            kgen[i] += 1;
+            Tgen[i] = Tgen0[i] * exp(-c * pow(kgen[i], 1.0 / npar));
+        }
+
+        ka += 1;
+        Ta = Ta0 * exp(-c * pow(ka, 1.0 / npar));
+
+        for (int i = 1; i < Neps; i++) {
+            fbestlist[i - 1] = fbestlist[i];
+        }
+        fbestlist[Neps - 1] = fbest;
+
+        int count = 0;
+        for (int i = 0; i < Neps - 1; i++) {
+            if (fabs(fbestlist[i + 1] - fbestlist[i]) < eps) {
+                count++;
+            }
+        }
+        if (count == Neps - 1) {
+            // printf("%f %f\n", fbest, chislimit);
+            if (fbest < chislimit) {
+                repeat = 0;
+            } else {
+                Ta = Ta0;
+            }
+        }
+        if (nrean >= Nterm) {
+            repeat = 0;
+        }
+    }
+
+    free(fbestlist);
+    free(kgen);
+    free(Tgen0);
+    free(Tgen);
+    free(delta);
+    free(ftest);
+    free(dftest);
+    free(x);
+    free(chi2_array);
+
+    for (int i = 0; i < npar; i++) {
+        results[i] = xbest[i];
+    }
+
+    free(xbest);
+}
+
+
+
+/* This is identical to run_astfit(), except that it includes a parallax prior of parallax = pi0 +/- sig_pi
 */ 
 
 void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, double pi0, double sig_pi) {
