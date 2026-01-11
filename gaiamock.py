@@ -176,7 +176,7 @@ def fit_orbital_solution_nonlinear_with_eccentricity_prior(t_ast_yr, psi, plx_fa
 
     
 def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, p0, reject_outlier=False,
-    nburn = 2500, nstep = 2500, nwalkers=64, parallax_priors = (None, -1), eccentricity_prior = False):
+    nburn = 2500, nstep = 2500, nwalkers=64, parallax_priors = (None, -1), eccentricity_prior = False, ecc_a = 1, ecc_b = 3):
     '''
     this function takes a starting guess p0 = [ra_off, dec_off, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G] and runs an MCMC 
     if parallax_priors[0] is not None, add a parallax prior of parallax = parallax_priors[0] +/- parallax_priors[1]
@@ -184,8 +184,7 @@ def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_
     '''
     import emcee
     from scipy.special import gammaln
-    a, b = 1, 3
-    ln_norm = gammaln(a + b) - gammaln(a) - gammaln(b)
+    ln_norm = gammaln(ecc_a + ecc_b) - gammaln(ecc_a) - gammaln(ecc_b)
     
     
     bound_low = [None, None, None, None, None, 0, 0, 0, None, None, None, None]
@@ -204,7 +203,7 @@ def mcmc_fit_with_thiele_innes_elements(t_ast_yr, psi, plx_factor, ast_obs, ast_
             if theta[6] <= 0.0 or theta[6] >= 1.0:
                 return -np.inf
             else:
-                lnprior += ln_norm + (a - 1.0) * np.log(theta[6]) + (b - 1.0) * np.log(1.0 - theta[6])
+                lnprior += ln_norm + (ecc_a - 1.0) * np.log(theta[6]) + (ecc_b - 1.0) * np.log(1.0 - theta[6])
         
         if np.isfinite(lnprior):
             lnlikelihood = ln_likelihood(theta)
@@ -1744,8 +1743,8 @@ def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, sam
         return get_astrometric_likelihoods_worker(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, samples = these_samples)
         
     res = Parallel(n_jobs=joblib.cpu_count())(delayed(run_this_j)(x) for x in range(joblib.cpu_count()))
-    L = np.exp(np.concatenate(res))
-    return L
+    lnL = np.concatenate(res)
+    return lnL
  
 def get_good_p0_ball(p0, theta_bounds, nwalkers, scatter = 0.001):
     '''

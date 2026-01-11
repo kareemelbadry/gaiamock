@@ -3,7 +3,7 @@ This needs to be compiled before the package can be used, and gsl needs to be li
  gcc -shared -o kepler_solve_astrometry.so kepler_solve_astrometry.c -I/opt/homebrew/Cellar/gsl/2.8/include  -L/opt/homebrew/Cellar/gsl/2.8/lib -lgsl -lgslcblas -lm 
 
 On my local cluster, I compiled with:
- gcc -shared -o kepler_solve_astrometry.so kepler_solve_astrometry.c -lgsl -lgslcblas -lm -fPIC*/
+ gcc -shared -o kepler_solve_astrometry.so kepler_solve_astrometry.c -lgsl -lgslcblas -lm -fPIC */
 
 #include <math.h>
 #include <stdlib.h>

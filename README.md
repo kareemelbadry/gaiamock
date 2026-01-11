@@ -25,6 +25,8 @@ If everything works, this will create a compiled file gaiamock/kepler_solve_astr
 
 A simple bash submission script to run on a cluster is provided in example_bash_submission.py. That reproduces Fig 13 of the paper. 
 
+This code is regularly updated and includes functionality beyond what is shown in the demo. If you have questions, or if you spot a bug, please contact me at kelbadry@caltech.edu. 
+
 # A modified version to predict RUWE more reliably for small orbits and single stars
 
 The default version of gaiamock does a pretty good job of predicting RUWE for binaries with "large" photocenter orbits -- see e.g. Figure 1 of [this](https://arxiv.org/abs/2504.11528) paper. However, it doesn't accurately predict the RUWE distribution of single stars or binaries with barely-detectable orbital motion: it predicts a RUWE distribution that is narrower than observed. There are at least two reason for this: 
