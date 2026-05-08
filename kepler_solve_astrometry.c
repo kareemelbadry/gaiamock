@@ -40,11 +40,16 @@ double solve_Kepler_equation(double Mi, double ecc, double xtol){
     double eps = 1;
     double EE0 = 0;
     double Mnorm = fmod(Mi, 2*PI);
+    if (Mnorm < 0.0) {
+        Mnorm += 2*PI;
+    }
     double EE = KeplerStart3(ecc, Mnorm);
-    while(eps > xtol){
+    int n_iter = 0;
+    while(eps > xtol && n_iter < 100){
         EE0 = EE;
         EE = EE0 - eps3(ecc, Mnorm, EE0);
         eps = fabs(EE0 - EE);
+        n_iter++;
     }
     return EE;
 }
@@ -180,18 +185,16 @@ void get_chi2_astrometry(int n_obs, double *t_ast_yr, double *psi, double *plx_f
     gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
     
     gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs);
-    gsl_matrix *C = gsl_matrix_calloc(n_obs, n_obs); 
     gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
     gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
     gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
     gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
     gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
 
-    // Compute ivar and fill Cinv and C
+    // Compute ivar and fill Cinv
     for (int j = 0; j < n_obs; j++) {
         ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
         gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
-        gsl_matrix_set(C, j, j, 1.0 / ivar[j]); // Set diagonal elements of C
     }    
     
     for(int j = 0; j < n_obs; j++){
@@ -243,7 +246,6 @@ void get_chi2_astrometry(int n_obs, double *t_ast_yr, double *psi, double *plx_f
     gsl_matrix_free(M);
     gsl_matrix_free(Mt);
     gsl_matrix_free(Cinv);
-    gsl_matrix_free(C);
     gsl_matrix_free(MtCinvM);
     gsl_vector_free(MtCinvY);
     gsl_vector_free(mu);
@@ -366,7 +368,6 @@ void get_chi2_astrometry_and_uncertainties(int n_obs, double *t_ast_yr, double *
     gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
     
     gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs);
-    gsl_matrix *C = gsl_matrix_calloc(n_obs, n_obs); 
     gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
     gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
     gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
@@ -374,11 +375,10 @@ void get_chi2_astrometry_and_uncertainties(int n_obs, double *t_ast_yr, double *
     gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
     
 
-    // Compute ivar and fill Cinv and C
+    // Compute ivar and fill Cinv
     for (int j = 0; j < n_obs; j++) {
         ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
         gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
-        gsl_matrix_set(C, j, j, 1.0 / ivar[j]); // Set diagonal elements of C
     }    
     
     for(int j = 0; j < n_obs; j++){
@@ -443,7 +443,6 @@ void get_chi2_astrometry_and_uncertainties(int n_obs, double *t_ast_yr, double *
     gsl_matrix_free(M);
     gsl_matrix_free(Mt);
     gsl_matrix_free(Cinv);
-    gsl_matrix_free(C);
     gsl_matrix_free(MtCinvM);
     gsl_vector_free(MtCinvY);
     gsl_vector_free(mu);
@@ -460,6 +459,362 @@ void get_chi2_astrometry_and_uncertainties(int n_obs, double *t_ast_yr, double *
 // Function to generate a random double between 0 and 1, needed for the optimization routine. 
 double random_double() {
     return (double)rand() / (double)RAND_MAX;
+}
+
+void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double P, double phi_p, double ecc, double *chi2_array);
+
+double astfit_objective_logp(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, int n_obs, int reject_outlier, double* L, double* U, double y[3]) {
+    if (y[0] < log(L[0]) || y[0] > log(U[0]) || y[1] < L[1] || y[1] > U[1] || y[2] < L[2] || y[2] > U[2]) {
+        return INFINITY;
+    }
+    double chi2_array[10];
+    double period = exp(y[0]);
+    if (reject_outlier) {
+        get_chi2_astrometry_reject_outliers(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, y[1], y[2], chi2_array);
+    } else {
+        get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, y[1], y[2], chi2_array);
+    }
+    return chi2_array[0];
+}
+
+void clamp_astfit_logp_vertex(double y[3], double* L, double* U) {
+    double log_p_min = log(L[0]);
+    double log_p_max = log(U[0]);
+    if (y[0] < log_p_min) y[0] = log_p_min;
+    if (y[0] > log_p_max) y[0] = log_p_max;
+    if (y[1] < L[1]) y[1] = L[1];
+    if (y[1] > U[1]) y[1] = U[1];
+    if (y[2] < L[2]) y[2] = L[2];
+    if (y[2] > U[2]) y[2] = U[2];
+}
+
+void sort_simplex4(double simplex[4][3], double f[4]) {
+    for (int i = 0; i < 3; i++) {
+        for (int j = i + 1; j < 4; j++) {
+            if (f[j] < f[i]) {
+                double tf = f[i];
+                f[i] = f[j];
+                f[j] = tf;
+                for (int k = 0; k < 3; k++) {
+                    double tx = simplex[i][k];
+                    simplex[i][k] = simplex[j][k];
+                    simplex[j][k] = tx;
+                }
+            }
+        }
+    }
+}
+
+void polish_astfit_start_nelder_mead(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, int n_obs, int reject_outlier, double* x) {
+    int n = 3;
+    int m = 4;
+    double simplex[4][3];
+    double f[4];
+    double steps[3] = {0.05, 0.25, 0.08};
+    double alpha = 1.0;
+    double gamma = 2.0;
+    double rho = 0.5;
+    double sigma = 0.5;
+
+    simplex[0][0] = log(x[0]);
+    simplex[0][1] = x[1];
+    simplex[0][2] = x[2];
+    clamp_astfit_logp_vertex(simplex[0], L, U);
+
+    for (int i = 1; i < m; i++) {
+        for (int k = 0; k < n; k++) {
+            simplex[i][k] = simplex[0][k];
+        }
+        simplex[i][i - 1] += steps[i - 1];
+        clamp_astfit_logp_vertex(simplex[i], L, U);
+        if (simplex[i][i - 1] == simplex[0][i - 1]) {
+            simplex[i][i - 1] -= steps[i - 1];
+            clamp_astfit_logp_vertex(simplex[i], L, U);
+        }
+    }
+
+    for (int i = 0; i < m; i++) {
+        f[i] = astfit_objective_logp(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, L, U, simplex[i]);
+    }
+
+    for (int iter = 0; iter < 400; iter++) {
+        sort_simplex4(simplex, f);
+        double fspread = fabs(f[3] - f[0]);
+        double xspread = 0.0;
+        for (int i = 1; i < m; i++) {
+            for (int k = 0; k < n; k++) {
+                double dx = fabs(simplex[i][k] - simplex[0][k]);
+                if (dx > xspread) xspread = dx;
+            }
+        }
+        if (fspread < 1e-6 && xspread < 1e-7) {
+            break;
+        }
+
+        double centroid[3] = {0.0, 0.0, 0.0};
+        for (int i = 0; i < 3; i++) {
+            for (int k = 0; k < n; k++) {
+                centroid[k] += simplex[i][k] / 3.0;
+            }
+        }
+
+        double xr[3];
+        for (int k = 0; k < n; k++) {
+            xr[k] = centroid[k] + alpha * (centroid[k] - simplex[3][k]);
+        }
+        clamp_astfit_logp_vertex(xr, L, U);
+        double fr = astfit_objective_logp(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, L, U, xr);
+
+        if (fr < f[0]) {
+            double xe[3];
+            for (int k = 0; k < n; k++) {
+                xe[k] = centroid[k] + gamma * (xr[k] - centroid[k]);
+            }
+            clamp_astfit_logp_vertex(xe, L, U);
+            double fe = astfit_objective_logp(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, L, U, xe);
+            if (fe < fr) {
+                for (int k = 0; k < n; k++) simplex[3][k] = xe[k];
+                f[3] = fe;
+            } else {
+                for (int k = 0; k < n; k++) simplex[3][k] = xr[k];
+                f[3] = fr;
+            }
+        } else if (fr < f[2]) {
+            for (int k = 0; k < n; k++) simplex[3][k] = xr[k];
+            f[3] = fr;
+        } else {
+            double xc[3];
+            if (fr < f[3]) {
+                for (int k = 0; k < n; k++) {
+                    xc[k] = centroid[k] + rho * (xr[k] - centroid[k]);
+                }
+            } else {
+                for (int k = 0; k < n; k++) {
+                    xc[k] = centroid[k] + rho * (simplex[3][k] - centroid[k]);
+                }
+            }
+            clamp_astfit_logp_vertex(xc, L, U);
+            double fc = astfit_objective_logp(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, L, U, xc);
+            if (fc < f[3]) {
+                for (int k = 0; k < n; k++) simplex[3][k] = xc[k];
+                f[3] = fc;
+            } else {
+                for (int i = 1; i < m; i++) {
+                    for (int k = 0; k < n; k++) {
+                        simplex[i][k] = simplex[0][k] + sigma * (simplex[i][k] - simplex[0][k]);
+                    }
+                    clamp_astfit_logp_vertex(simplex[i], L, U);
+                    f[i] = astfit_objective_logp(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, L, U, simplex[i]);
+                }
+            }
+        }
+    }
+
+    sort_simplex4(simplex, f);
+    x[0] = exp(simplex[0][0]);
+    x[1] = simplex[0][1];
+    x[2] = simplex[0][2];
+}
+
+typedef struct {
+    double chi2;
+    double period;
+    double phi_p;
+    double ecc;
+} AstfitCandidate;
+
+int compare_astfit_candidate(const void* a, const void* b) {
+    double da = ((const AstfitCandidate*)a)->chi2;
+    double db = ((const AstfitCandidate*)b)->chi2;
+    if (da < db) return -1;
+    if (da > db) return 1;
+    return 0;
+}
+
+double astfit_phase_distance(double a, double b) {
+    double d = fabs(a - b);
+    while (d > 2.0 * PI) {
+        d -= 2.0 * PI;
+    }
+    if (d > PI) {
+        d = 2.0 * PI - d;
+    }
+    return d;
+}
+
+void insert_astfit_candidate(AstfitCandidate* candidates, int* n_candidates, int max_candidates, double chi2, double period, double phi_p, double ecc) {
+    if (!isfinite(chi2)) {
+        return;
+    }
+    if (*n_candidates >= max_candidates && chi2 >= candidates[*n_candidates - 1].chi2) {
+        return;
+    }
+
+    int pos = *n_candidates;
+    if (pos < max_candidates) {
+        *n_candidates += 1;
+    } else {
+        pos = max_candidates - 1;
+    }
+
+    while (pos > 0 && chi2 < candidates[pos - 1].chi2) {
+        candidates[pos] = candidates[pos - 1];
+        pos--;
+    }
+
+    candidates[pos].chi2 = chi2;
+    candidates[pos].period = period;
+    candidates[pos].phi_p = phi_p;
+    candidates[pos].ecc = ecc;
+}
+
+int astfit_period_is_distinct(double period, double* periods, int n_periods, double log_separation) {
+    for (int i = 0; i < n_periods; i++) {
+        if (fabs(log(period / periods[i])) < log_separation) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int astfit_start_is_distinct(AstfitCandidate candidate, AstfitCandidate* starts, int n_starts) {
+    for (int i = 0; i < n_starts; i++) {
+        if (
+            fabs(log(candidate.period / starts[i].period)) < 0.003 &&
+            astfit_phase_distance(candidate.phi_p, starts[i].phi_p) < 0.05 &&
+            fabs(candidate.ecc - starts[i].ecc) < 0.05
+        ) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+double eval_astfit_candidate(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, int n_obs, int reject_outlier, double period, double phi_p, double ecc) {
+    double chi2_array[10];
+    if (reject_outlier) {
+        get_chi2_astrometry_reject_outliers(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, phi_p, ecc, chi2_array);
+    } else {
+        get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, period, phi_p, ecc, chi2_array);
+    }
+    return chi2_array[0];
+}
+
+void scan_circular_period_grid(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, int n_obs, int reject_outlier, double p_min, double p_max, int n_period, int n_phase, AstfitCandidate* rows, int* n_rows) {
+    double log_p_min = log(p_min);
+    double log_p_max = log(p_max);
+    for (int ip = 0; ip < n_period; ip++) {
+        double frac = (n_period == 1) ? 0.0 : ((double)ip / (double)(n_period - 1));
+        double period = exp(log_p_min + frac * (log_p_max - log_p_min));
+        AstfitCandidate best;
+        best.chi2 = INFINITY;
+        best.period = period;
+        best.phi_p = L[1];
+        best.ecc = 0.0;
+        for (int iph = 0; iph < n_phase; iph++) {
+            double phi_p = L[1] + ((double)iph / (double)n_phase) * (U[1] - L[1]);
+            double chi2 = eval_astfit_candidate(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, period, phi_p, 0.0);
+            if (chi2 < best.chi2) {
+                best.chi2 = chi2;
+                best.phi_p = phi_p;
+            }
+        }
+        rows[*n_rows] = best;
+        *n_rows += 1;
+    }
+}
+
+/* Deterministic C-only nonlinear search for (P, phi_p, e): broad/short circular period grids,
+   eccentric phase scans around the best distinct periods, then Nelder-Mead polish of the best starts.
+   results[0:4] = P, phi_p, e, chi2. */
+void run_astfit_grid_multistart(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    int n_period = 260;
+    int n_phase = 8;
+    int n_short_period = 800;
+    int n_ecc_phase = 48;
+    int max_periods = 32;
+    int max_candidates = 256;
+    int max_starts = 64;
+    double short_period_max = fmin(U[0], 300.0);
+    double ecc_grid[6] = {0.0, 0.2, 0.4, 0.6, 0.8, 0.95};
+
+    int max_rows = n_period + ((short_period_max > L[0]) ? n_short_period : 0) + 8;
+    AstfitCandidate* circular_rows = (AstfitCandidate*)malloc(max_rows * sizeof(AstfitCandidate));
+    int n_rows = 0;
+    scan_circular_period_grid(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, L[0], U[0], n_period, n_phase, circular_rows, &n_rows);
+    if (short_period_max > L[0]) {
+        scan_circular_period_grid(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, L[0], short_period_max, n_short_period, n_phase, circular_rows, &n_rows);
+    }
+    qsort(circular_rows, n_rows, sizeof(AstfitCandidate), compare_astfit_candidate);
+
+    double* periods = (double*)malloc(max_periods * sizeof(double));
+    int n_periods = 0;
+    for (int i = 0; i < n_rows && n_periods < 24; i++) {
+        if (astfit_period_is_distinct(circular_rows[i].period, periods, n_periods, 0.025)) {
+            periods[n_periods] = circular_rows[i].period;
+            n_periods++;
+        }
+    }
+    for (int i = 0; i < 8 && n_periods < max_periods; i++) {
+        double period = U[0] * exp(-((double)i / 7.0));
+        if (period >= L[0] && period <= U[0] && astfit_period_is_distinct(period, periods, n_periods, 0.01)) {
+            periods[n_periods] = period;
+            n_periods++;
+        }
+    }
+
+    AstfitCandidate* candidates = (AstfitCandidate*)malloc(max_candidates * sizeof(AstfitCandidate));
+    int n_candidates = 0;
+    for (int i = 0; i < n_rows && i < 128; i++) {
+        insert_astfit_candidate(candidates, &n_candidates, max_candidates, circular_rows[i].chi2, circular_rows[i].period, circular_rows[i].phi_p, circular_rows[i].ecc);
+    }
+    for (int ip = 0; ip < n_periods; ip++) {
+        double period = periods[ip];
+        for (int ie = 0; ie < 6; ie++) {
+            double ecc = ecc_grid[ie];
+            if (ecc < L[2] || ecc > U[2]) {
+                continue;
+            }
+            for (int iph = 0; iph < n_ecc_phase; iph++) {
+                double phi_p = L[1] + ((double)iph / (double)n_ecc_phase) * (U[1] - L[1]);
+                double chi2 = eval_astfit_candidate(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, period, phi_p, ecc);
+                insert_astfit_candidate(candidates, &n_candidates, max_candidates, chi2, period, phi_p, ecc);
+            }
+        }
+    }
+
+    AstfitCandidate* starts = (AstfitCandidate*)malloc(max_starts * sizeof(AstfitCandidate));
+    int n_starts = 0;
+    for (int i = 0; i < n_candidates && n_starts < max_starts; i++) {
+        if (astfit_start_is_distinct(candidates[i], starts, n_starts)) {
+            starts[n_starts] = candidates[i];
+            n_starts++;
+        }
+    }
+
+    double best_chi2 = INFINITY;
+    double best_x[3] = {(U[0] + L[0]) / 2.0, (U[1] + L[1]) / 2.0, (U[2] + L[2]) / 2.0};
+    for (int i = 0; i < n_starts; i++) {
+        double x[3] = {starts[i].period, starts[i].phi_p, starts[i].ecc};
+        polish_astfit_start_nelder_mead(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, x);
+        double chi2 = eval_astfit_candidate(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, x[0], x[1], x[2]);
+        if (chi2 < best_chi2) {
+            best_chi2 = chi2;
+            best_x[0] = x[0];
+            best_x[1] = x[1];
+            best_x[2] = x[2];
+        }
+    }
+
+    results[0] = best_x[0];
+    results[1] = best_x[1];
+    results[2] = best_x[2];
+    results[3] = best_chi2;
+
+    free(circular_rows);
+    free(periods);
+    free(candidates);
+    free(starts);
 }
 
 /* This is a helper function for the adaptive simulated annealing. x is the current guess of the array of parameters. L and U are arrays of lower and upper limits. xnew will be the proposed new gues. Tgen is the temperature and len is the number of free parameters. */
@@ -511,7 +866,7 @@ void run_astfit(double* t_ast_yr, double* psi, double *plx_factor, double* ast_o
 
     double* x = (double*)malloc(npar * sizeof(double));
     for (int i = 0; i < npar; i++) {
-        x[i] = (U[i] + L[i]) / 2.0; 
+        x[i] = (U[i] + L[i]) / 2.0;
     }
 
     double* chi2_array = (double*)malloc(10 * sizeof(double));
@@ -613,13 +968,19 @@ void run_astfit(double* t_ast_yr, double* psi, double *plx_factor, double* ast_o
 
             if (nacep >= Na) {
                 double* s = (double*)calloc(npar, sizeof(double));
+
                 for (int g = 0; g < npar; g++) {
-                    double* ee = (double*)calloc(npar, sizeof(double));
-                    ee[g] = delta[g];
-                    get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], chi2_array);
+                    double xdelta[npar];
+                    for (int i = 0; i < npar; i++) {
+                        xdelta[i] = xbest[i];
+                    }
+                    xdelta[g] += delta[g];
+
+                    get_chi2_astrometry(
+                        n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err,xdelta[0], xdelta[1], xdelta[2], chi2_array);
+
                     double fbestdelta = chi2_array[0];
                     s[g] = fabs((fbestdelta - fbest) / delta[g]);
-                    free(ee);
                 }
 
                 for (int i = 0; i < npar; i++) {
@@ -746,7 +1107,7 @@ void run_astfit_eccentricity_prior(double* t_ast_yr, double* psi, double *plx_fa
 
     double* x = (double*)malloc(npar * sizeof(double));
     for (int i = 0; i < npar; i++) {
-        x[i] = (U[i] + L[i]) / 2.0; 
+        x[i] = (U[i] + L[i]) / 2.0;
     }
 
     double* chi2_array = (double*)malloc(10 * sizeof(double));
@@ -849,14 +1210,33 @@ void run_astfit_eccentricity_prior(double* t_ast_yr, double* psi, double *plx_fa
             if (nacep >= Na) {
                 double* s = (double*)calloc(npar, sizeof(double));
                 for (int g = 0; g < npar; g++) {
-                    double* ee = (double*)calloc(npar, sizeof(double));
-                    ee[g] = delta[g];
-                    get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], chi2_array);
-                    double fbestdelta = chi2_array[0] - 2.0 * log_beta_prior(xnew[2], ecc_a, ecc_b);
-                    s[g] = fabs((fbestdelta - fbest) / delta[g]);
-                    free(ee);
-                }
+                    double xdelta[npar];
 
+                    for (int i = 0; i < npar; i++) {
+                        xdelta[i] = xbest[i];
+                    }
+
+                    xdelta[g] += delta[g];
+
+                    for (int i = 0; i < npar; i++) {
+                        if (xdelta[i] <= L[i]) {
+                            xdelta[i] = L[i] + delta[i];
+                        }
+                        if (xdelta[i] >= U[i]) {
+                            xdelta[i] = U[i] - delta[i];
+                        }
+                    }
+
+                    get_chi2_astrometry(
+                        n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err,
+                        xdelta[0], xdelta[1], xdelta[2], chi2_array
+                    );
+
+                    double fbestdelta = chi2_array[0] - 2.0 * log_beta_prior(xdelta[2], ecc_a, ecc_b);
+                    s[g] = fabs((fbestdelta - fbest) / delta[g]);
+                }
+                
+                
                 for (int i = 0; i < npar; i++) {
                     if (s[i] == 0.0) {
                         double min_nonzero = 1e10;
@@ -983,7 +1363,7 @@ void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor
 
     double* x = (double*)malloc(npar * sizeof(double));
     for (int i = 0; i < npar; i++) {
-        x[i] = (U[i] + L[i]) / 2.0; 
+        x[i] = (U[i] + L[i]) / 2.0;
     }
 
     double* chi2_array = (double*)malloc(10 * sizeof(double));
@@ -1086,13 +1466,34 @@ void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor
             if (nacep >= Na) {
                 double* s = (double*)calloc(npar, sizeof(double));
                 for (int g = 0; g < npar; g++) {
-                    double* ee = (double*)calloc(npar, sizeof(double));
-                    ee[g] = delta[g];
-                    get_chi2_astrometry_parallax_prior(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], pi0, sig_pi, chi2_array);
+                    double xdelta[npar];
+
+                    for (int i = 0; i < npar; i++) {
+                        xdelta[i] = xbest[i];
+                    }
+
+                    xdelta[g] += delta[g];
+
+                    for (int i = 0; i < npar; i++) {
+                        if (xdelta[i] <= L[i]) {
+                            xdelta[i] = L[i] + delta[i];
+                        }
+                        if (xdelta[i] >= U[i]) {
+                            xdelta[i] = U[i] - delta[i];
+                        }
+                    }
+
+                    get_chi2_astrometry_parallax_prior(
+                        n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err,
+                        xdelta[0], xdelta[1], xdelta[2],
+                        pi0, sig_pi, chi2_array
+                    );
+
                     double fbestdelta = chi2_array[0];
                     s[g] = fabs((fbestdelta - fbest) / delta[g]);
-                    free(ee);
                 }
+                
+
 
                 for (int i = 0; i < npar; i++) {
                     if (s[i] == 0.0) {
@@ -1205,20 +1606,20 @@ void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double 
     gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
     
     gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs); // Allocate and initialize to zero
-    gsl_matrix *C = gsl_matrix_calloc(n_obs, n_obs); // Allocate and initialize to zero
 
     gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
     gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
     gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
     gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
     gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
+    gsl_vector *Cinv_ast_obs = gsl_vector_alloc(n_obs); 
+    gsl_vector_view ast_obs_view = gsl_vector_view_array(ast_obs, n_obs); 
     
 
-    // Compute ivar and fill Cinv and C
+    // Compute ivar and fill Cinv
     for (int j = 0; j < n_obs; j++) {
         ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
         gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
-        gsl_matrix_set(C, j, j, 1.0 / ivar[j]); // Set diagonal elements of C
     }    
     
     for(int i = 0; i < n_samp; i++) {
@@ -1248,9 +1649,6 @@ void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double 
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, temp, M, 0.0, MtCinvM);
         
         // Compute Mt * Cinv * ast_obs
-        gsl_vector *Cinv_ast_obs = gsl_vector_alloc(n_obs); 
-        gsl_vector_view ast_obs_view = gsl_vector_view_array(ast_obs, n_obs); 
-        
         // Perform the multiplication Cinv * ast_obs; multiply Mt and the result of the first multiplication
         gsl_blas_dgemv(CblasNoTrans, 1.0, Cinv, &ast_obs_view.vector, 0.0, Cinv_ast_obs);
         gsl_blas_dgemv(CblasNoTrans, 1.0, Mt, Cinv_ast_obs, 0.0, MtCinvY);
@@ -1277,12 +1675,12 @@ void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double 
     gsl_matrix_free(M);
     gsl_matrix_free(Mt);
     gsl_matrix_free(Cinv);
-    gsl_matrix_free(C);
     gsl_matrix_free(MtCinvM);
     gsl_vector_free(MtCinvY);
     gsl_vector_free(mu);
     gsl_vector_free(Lambda_pred);
     gsl_matrix_free(temp);
+    gsl_vector_free(Cinv_ast_obs);
 }
 
 
@@ -1299,18 +1697,16 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
     gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
     
     gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs);
-    gsl_matrix *C = gsl_matrix_calloc(n_obs, n_obs); 
     gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
     gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
     gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
     gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
     gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
 
-    // Compute ivar and fill Cinv and C
+    // Compute ivar and fill Cinv
     for (int j = 0; j < n_obs; j++) {
         ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
         gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
-        gsl_matrix_set(C, j, j, 1.0 / ivar[j]); // Set diagonal elements of C
     }    
     
     for(int j = 0; j < n_obs; j++){
@@ -1368,7 +1764,6 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
     gsl_matrix_free(M);
     gsl_matrix_free(Mt);
     gsl_matrix_free(Cinv);
-    gsl_matrix_free(C);
     gsl_matrix_free(MtCinvM);
     gsl_vector_free(MtCinvY);
     gsl_vector_free(mu);
@@ -1405,7 +1800,7 @@ void run_astfit_reject_outlier(double* t_ast_yr, double* psi, double *plx_factor
 
     double* x = (double*)malloc(npar * sizeof(double));
     for (int i = 0; i < npar; i++) {
-        x[i] = (U[i] + L[i]) / 2.0; 
+        x[i] = (U[i] + L[i]) / 2.0;
     }
 
     double* chi2_array = (double*)malloc(10 * sizeof(double));
@@ -1507,14 +1902,22 @@ void run_astfit_reject_outlier(double* t_ast_yr, double* psi, double *plx_factor
 
             if (nacep >= Na) {
                 double* s = (double*)calloc(npar, sizeof(double));
+                
                 for (int g = 0; g < npar; g++) {
-                    double* ee = (double*)calloc(npar, sizeof(double));
-                    ee[g] = delta[g];
-                    get_chi2_astrometry_reject_outliers(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, xnew[0], xnew[1], xnew[2], chi2_array);
+                    double xdelta[npar];
+
+                    for (int i = 0; i < npar; i++) {
+                        xdelta[i] = xbest[i];
+                    }
+                    xdelta[g] += delta[g];
+                    get_chi2_astrometry_reject_outliers(
+                        n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err,
+                        xdelta[0], xdelta[1], xdelta[2], chi2_array
+                    );
                     double fbestdelta = chi2_array[0];
                     s[g] = fabs((fbestdelta - fbest) / delta[g]);
-                    free(ee);
                 }
+                
 
                 for (int i = 0; i < npar; i++) {
                     if (s[i] == 0.0) {
@@ -1611,4 +2014,3 @@ void run_astfit_reject_outlier(double* t_ast_yr, double* psi, double *plx_factor
 
     free(xbest);
 }
-
