@@ -180,23 +180,14 @@ void get_chi2_astrometry(int n_obs, double *t_ast_yr, double *psi, double *plx_f
     double Mi;
     double X[n_obs];
     double Y[n_obs]; 
-    double ivar[n_obs];
     
     gsl_matrix *M = gsl_matrix_calloc(n_obs, 9);
-    gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
-    
-    gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs);
+    gsl_matrix *Mw = gsl_matrix_calloc(n_obs, 9);
     gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
     gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
     gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
     gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
-    gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
-
-    // Compute ivar and fill Cinv
-    for (int j = 0; j < n_obs; j++) {
-        ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
-        gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
-    }    
+    gsl_vector *weighted_ast_obs = gsl_vector_alloc(n_obs);
     
     for(int j = 0; j < n_obs; j++){
         Mi = 2*PI*t_ast_yr[j]*365.25/P - phi_p;
@@ -216,15 +207,15 @@ void get_chi2_astrometry(int n_obs, double *t_ast_yr, double *psi, double *plx_f
         gsl_matrix_set(M, j, 6, Y[j] * sin(psi[j]) );
         gsl_matrix_set(M, j, 7, X[j] * cos(psi[j]));
         gsl_matrix_set(M, j, 8, Y[j] * cos(psi[j]));
+        double inv_err = 1.0 / ast_err[j];
+        for (int k = 0; k < 9; k++) {
+            gsl_matrix_set(Mw, j, k, gsl_matrix_get(M, j, k) * inv_err);
+        }
+        gsl_vector_set(weighted_ast_obs, j, ast_obs[j] * inv_err);
     }
-    gsl_matrix_transpose_memcpy(Mt, M);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, Mt, Cinv, 0.0, temp);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, temp, M, 0.0, MtCinvM);
-    
-    gsl_vector *Cinv_ast_obs = gsl_vector_alloc(n_obs); // Allocate vector for the result of Cinv @ ast_obs
-    gsl_vector_view ast_obs_view = gsl_vector_view_array(ast_obs, n_obs); // Create a vector view of ast_obs
-    gsl_blas_dgemv(CblasNoTrans, 1.0, Cinv, &ast_obs_view.vector, 0.0, Cinv_ast_obs);
-    gsl_blas_dgemv(CblasNoTrans, 1.0, Mt, Cinv_ast_obs, 0.0, MtCinvY);
+
+    gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Mw, Mw, 0.0, MtCinvM);
+    gsl_blas_dgemv(CblasTrans, 1.0, Mw, weighted_ast_obs, 0.0, MtCinvY);
     gsl_linalg_HH_solve(MtCinvM, MtCinvY, mu);
     gsl_blas_dgemv(CblasNoTrans, 1.0, M, mu, 0.0, Lambda_pred);
     
@@ -245,14 +236,12 @@ void get_chi2_astrometry(int n_obs, double *t_ast_yr, double *psi, double *plx_f
 
     // Cleanup
     gsl_matrix_free(M);
-    gsl_matrix_free(Mt);
-    gsl_matrix_free(Cinv);
+    gsl_matrix_free(Mw);
     gsl_matrix_free(MtCinvM);
     gsl_vector_free(MtCinvY);
     gsl_vector_free(mu);
     gsl_vector_free(Lambda_pred);
-    gsl_matrix_free(temp);
-    gsl_vector_free(Cinv_ast_obs);
+    gsl_vector_free(weighted_ast_obs);
 }
 
 
@@ -1907,22 +1896,18 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
     double ivar[n_obs];
     
     gsl_matrix *M = gsl_matrix_calloc(n_obs, 9);
-    gsl_matrix *Mt = gsl_matrix_alloc(9, n_obs);
-    
-    gsl_matrix *Cinv = gsl_matrix_calloc(n_obs, n_obs);
+    gsl_matrix *Mw = gsl_matrix_calloc(n_obs, 9);
     gsl_matrix *MtCinvM = gsl_matrix_alloc(9, 9); // Result of Mt * Cinv * M
     gsl_vector *MtCinvY = gsl_vector_alloc(9); // Result of Mt * Cinv * ast_obs
     gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
     gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
-    gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
+    gsl_vector *weighted_ast_obs = gsl_vector_alloc(n_obs);
     gsl_matrix *normal_matrix = gsl_matrix_alloc(9, 9);
     gsl_matrix *normal_inverse = gsl_matrix_alloc(9, 9);
     gsl_permutation *perm = gsl_permutation_alloc(9);
 
-    // Compute ivar and fill Cinv
     for (int j = 0; j < n_obs; j++) {
-        ivar[j] = 1.0 / (ast_err[j] * ast_err[j]); // Compute inverse variance
-        gsl_matrix_set(Cinv, j, j, ivar[j]); // Set diagonal elements of Cinv
+        ivar[j] = 1.0 / (ast_err[j] * ast_err[j]);
     }    
     
     for(int j = 0; j < n_obs; j++){
@@ -1943,15 +1928,15 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
         gsl_matrix_set(M, j, 6, Y[j] * sin(psi[j]) );
         gsl_matrix_set(M, j, 7, X[j] * cos(psi[j]));
         gsl_matrix_set(M, j, 8, Y[j] * cos(psi[j]));
+        double inv_err = 1.0 / ast_err[j];
+        for (int k = 0; k < 9; k++) {
+            gsl_matrix_set(Mw, j, k, gsl_matrix_get(M, j, k) * inv_err);
+        }
+        gsl_vector_set(weighted_ast_obs, j, ast_obs[j] * inv_err);
     }
-    gsl_matrix_transpose_memcpy(Mt, M);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, Mt, Cinv, 0.0, temp);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, temp, M, 0.0, MtCinvM);
-    
-    gsl_vector *Cinv_ast_obs = gsl_vector_alloc(n_obs); // Allocate vector for the result of Cinv @ ast_obs
-    gsl_vector_view ast_obs_view = gsl_vector_view_array(ast_obs, n_obs); // Create a vector view of ast_obs
-    gsl_blas_dgemv(CblasNoTrans, 1.0, Cinv, &ast_obs_view.vector, 0.0, Cinv_ast_obs);
-    gsl_blas_dgemv(CblasNoTrans, 1.0, Mt, Cinv_ast_obs, 0.0, MtCinvY);
+
+    gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Mw, Mw, 0.0, MtCinvM);
+    gsl_blas_dgemv(CblasTrans, 1.0, Mw, weighted_ast_obs, 0.0, MtCinvY);
 
     gsl_matrix_memcpy(normal_matrix, MtCinvM);
     int signum;
@@ -1991,14 +1976,12 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
         free(ast_err_new);
 
         gsl_matrix_free(M);
-        gsl_matrix_free(Mt);
-        gsl_matrix_free(Cinv);
+        gsl_matrix_free(Mw);
         gsl_matrix_free(MtCinvM);
         gsl_vector_free(MtCinvY);
         gsl_vector_free(mu);
         gsl_vector_free(Lambda_pred);
-        gsl_matrix_free(temp);
-        gsl_vector_free(Cinv_ast_obs);
+        gsl_vector_free(weighted_ast_obs);
         gsl_matrix_free(normal_matrix);
         gsl_matrix_free(normal_inverse);
         gsl_permutation_free(perm);
@@ -2076,14 +2059,12 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
  
     // Cleanup
     gsl_matrix_free(M);
-    gsl_matrix_free(Mt);
-    gsl_matrix_free(Cinv);
+    gsl_matrix_free(Mw);
     gsl_matrix_free(MtCinvM);
     gsl_vector_free(MtCinvY);
     gsl_vector_free(mu);
     gsl_vector_free(Lambda_pred);
-    gsl_matrix_free(temp);
-    gsl_vector_free(Cinv_ast_obs);
+    gsl_vector_free(weighted_ast_obs);
     gsl_matrix_free(normal_matrix);
     gsl_matrix_free(normal_inverse);
     gsl_permutation_free(perm);
