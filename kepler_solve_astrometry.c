@@ -14,6 +14,40 @@ On my local cluster, I compiled with:
 #include <gsl/gsl_errno.h>
 #define PI 3.14159265358979
 
+#ifndef ASTFIT_N_PERIOD
+#define ASTFIT_N_PERIOD 180
+#endif
+#ifndef ASTFIT_N_SHORT_PERIOD
+#define ASTFIT_N_SHORT_PERIOD 560
+#endif
+#ifndef ASTFIT_N_ECC_PHASE
+#define ASTFIT_N_ECC_PHASE 36
+#endif
+#ifndef ASTFIT_MAX_PERIODS_KEEP
+#define ASTFIT_MAX_PERIODS_KEEP 20
+#endif
+#ifndef ASTFIT_MAX_STARTS
+#define ASTFIT_MAX_STARTS 48
+#endif
+#ifndef ASTFIT_NM_MAX_ITER
+#define ASTFIT_NM_MAX_ITER 250
+#endif
+#ifndef ASTFIT_NM_FSPREAD_TOL
+#define ASTFIT_NM_FSPREAD_TOL 1e-4
+#endif
+#ifndef ASTFIT_NM_XSPREAD_TOL
+#define ASTFIT_NM_XSPREAD_TOL 3e-6
+#endif
+
+#define ASTFIT_FULL_N_PERIOD 260
+#define ASTFIT_FULL_N_SHORT_PERIOD 800
+#define ASTFIT_FULL_N_ECC_PHASE 48
+#define ASTFIT_FULL_MAX_PERIODS_KEEP 24
+#define ASTFIT_FULL_MAX_STARTS 64
+#define ASTFIT_FULL_NM_MAX_ITER 400
+#define ASTFIT_FULL_NM_FSPREAD_TOL 1e-6
+#define ASTFIT_FULL_NM_XSPREAD_TOL 1e-7
+
 
 /* This is a helper function for solving Kepler's equation. From http://alpheratz.net/dynamics/twobody/KeplerIterations_summary.pdf */
 double eps3(double ecc, double M, double x){
@@ -495,7 +529,7 @@ void sort_simplex4(double simplex[4][3], double f[4]) {
     }
 }
 
-void polish_astfit_start_nelder_mead(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, int n_obs, int reject_outlier, double* x) {
+void polish_astfit_start_nelder_mead_config(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, int n_obs, int reject_outlier, double* x, int max_iter, double fspread_tol, double xspread_tol) {
     int n = 3;
     int m = 4;
     double simplex[4][3];
@@ -527,7 +561,7 @@ void polish_astfit_start_nelder_mead(double* t_ast_yr, double* psi, double *plx_
         f[i] = astfit_objective_logp(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, L, U, simplex[i]);
     }
 
-    for (int iter = 0; iter < 400; iter++) {
+    for (int iter = 0; iter < max_iter; iter++) {
         sort_simplex4(simplex, f);
         double fspread = fabs(f[3] - f[0]);
         double xspread = 0.0;
@@ -537,7 +571,7 @@ void polish_astfit_start_nelder_mead(double* t_ast_yr, double* psi, double *plx_
                 if (dx > xspread) xspread = dx;
             }
         }
-        if (fspread < 1e-6 && xspread < 1e-7) {
+        if (fspread < fspread_tol && xspread < xspread_tol) {
             break;
         }
 
@@ -604,6 +638,14 @@ void polish_astfit_start_nelder_mead(double* t_ast_yr, double* psi, double *plx_
     x[0] = exp(simplex[0][0]);
     x[1] = simplex[0][1];
     x[2] = simplex[0][2];
+}
+
+void polish_astfit_start_nelder_mead(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, int n_obs, int reject_outlier, double* x) {
+    polish_astfit_start_nelder_mead_config(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, x, ASTFIT_NM_MAX_ITER, ASTFIT_NM_FSPREAD_TOL, ASTFIT_NM_XSPREAD_TOL);
+}
+
+void polish_astfit_start_nelder_mead_full(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, int n_obs, int reject_outlier, double* x) {
+    polish_astfit_start_nelder_mead_config(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, x, ASTFIT_FULL_NM_MAX_ITER, ASTFIT_FULL_NM_FSPREAD_TOL, ASTFIT_FULL_NM_XSPREAD_TOL);
 }
 
 typedef struct {
@@ -837,13 +879,14 @@ void scan_circular_periodogram_grid(double* t_ast_yr, double* psi, double *plx_f
    eccentric phase scans around the best distinct periods, then Nelder-Mead polish of the best starts.
    results[0:4] = P, phi_p, e, chi2. */
 void run_astfit_grid_multistart(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
-    int n_period = 260;
+    int n_period = ASTFIT_N_PERIOD;
     int n_phase = 8;
-    int n_short_period = 800;
-    int n_ecc_phase = 48;
+    int n_short_period = ASTFIT_N_SHORT_PERIOD;
+    int n_ecc_phase = ASTFIT_N_ECC_PHASE;
     int max_periods = 32;
     int max_candidates = 256;
-    int max_starts = 64;
+    int max_periods_keep = ASTFIT_MAX_PERIODS_KEEP;
+    int max_starts = ASTFIT_MAX_STARTS;
     double short_period_max = fmin(U[0], 300.0);
     double ecc_grid[6] = {0.0, 0.2, 0.4, 0.6, 0.8, 0.95};
 
@@ -858,7 +901,7 @@ void run_astfit_grid_multistart(double* t_ast_yr, double* psi, double *plx_facto
 
     double* periods = (double*)malloc(max_periods * sizeof(double));
     int n_periods = 0;
-    for (int i = 0; i < n_rows && n_periods < 24; i++) {
+    for (int i = 0; i < n_rows && n_periods < max_periods_keep; i++) {
         if (astfit_period_is_distinct(circular_rows[i].period, periods, n_periods, 0.025)) {
             periods[n_periods] = circular_rows[i].period;
             n_periods++;
@@ -930,13 +973,9 @@ void run_astfit_grid_multistart(double* t_ast_yr, double* psi, double *plx_facto
    The circular phase is absorbed by the linear Thiele-Innes coefficients, so this scores
    each trial period once, then keeps the existing eccentric phase scan and Nelder-Mead polish.
    results[0:4] = P, phi_p, e, chi2. */
-void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
-    int n_period = 260;
-    int n_short_period = 800;
-    int n_ecc_phase = 48;
+void run_astfit_periodogram_multistart_config(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier, int n_period, int n_short_period, int n_ecc_phase, int max_periods_keep, int max_starts, int use_full_nm) {
     int max_periods = 32;
     int max_candidates = 256;
-    int max_starts = 64;
     double short_period_max = fmin(U[0], 300.0);
     double ecc_grid[6] = {0.0, 0.2, 0.4, 0.6, 0.8, 0.95};
 
@@ -951,7 +990,7 @@ void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *pl
 
     double* periods = (double*)malloc(max_periods * sizeof(double));
     int n_periods = 0;
-    for (int i = 0; i < n_rows && n_periods < 24; i++) {
+    for (int i = 0; i < n_rows && n_periods < max_periods_keep; i++) {
         if (astfit_period_is_distinct(periodogram_rows[i].period, periods, n_periods, 0.025)) {
             periods[n_periods] = periodogram_rows[i].period;
             n_periods++;
@@ -998,7 +1037,11 @@ void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *pl
     double best_x[3] = {(U[0] + L[0]) / 2.0, (U[1] + L[1]) / 2.0, (U[2] + L[2]) / 2.0};
     for (int i = 0; i < n_starts; i++) {
         double x[3] = {starts[i].period, starts[i].phi_p, starts[i].ecc};
-        polish_astfit_start_nelder_mead(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, x);
+        if (use_full_nm) {
+            polish_astfit_start_nelder_mead_full(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, x);
+        } else {
+            polish_astfit_start_nelder_mead(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, x);
+        }
         double chi2 = eval_astfit_candidate(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, x[0], x[1], x[2]);
         if (chi2 < best_chi2) {
             best_chi2 = chi2;
@@ -1017,6 +1060,14 @@ void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *pl
     free(periods);
     free(candidates);
     free(starts);
+}
+
+void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    run_astfit_periodogram_multistart_config(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, results, n_obs, reject_outlier, ASTFIT_N_PERIOD, ASTFIT_N_SHORT_PERIOD, ASTFIT_N_ECC_PHASE, ASTFIT_MAX_PERIODS_KEEP, ASTFIT_MAX_STARTS, 0);
+}
+
+void run_astfit_periodogram_multistart_full(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    run_astfit_periodogram_multistart_config(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, results, n_obs, reject_outlier, ASTFIT_FULL_N_PERIOD, ASTFIT_FULL_N_SHORT_PERIOD, ASTFIT_FULL_N_ECC_PHASE, ASTFIT_FULL_MAX_PERIODS_KEEP, ASTFIT_FULL_MAX_STARTS, 1);
 }
 
 /* This is a helper function for the adaptive simulated annealing. x is the current guess of the array of parameters. L and U are arrays of lower and upper limits. xnew will be the proposed new gues. Tgen is the temperature and len is the number of free parameters. */

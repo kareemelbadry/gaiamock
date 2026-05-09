@@ -134,7 +134,7 @@ def get_astrometric_residuals_12par_campbell(t_ast_yr, psi, plx_factor, ast_obs,
 
 def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
     L = np.array([10, 0, 0]), U = np.array([1e4, 2*np.pi, 0.99]), reject_outlier=False,
-    optimizer="annealing"):
+    optimizer="periodogram_multistart"):
     '''
     Fit the nonlinear orbital parameters (P, phi_p, e) for epoch astrometry.
 
@@ -144,11 +144,15 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
     angles in radians.
 
     optimizer:
+        "periodogram_multistart" is the default. It uses a C linear
+        circular-orbit periodogram to choose period starts before the eccentric
+        scan and Nelder-Mead polish. The compiled C defaults use the faster
+        grid_70pct_nm_loose settings.
+        "periodogram_multistart_full" uses the original denser periodogram grid
+        and tighter Nelder-Mead tolerances.
         "annealing" uses the original adaptive simulated annealing optimizer.
         "multistart" uses the deterministic C grid/multistart optimizer and
         requires a compiled C library with run_astfit_grid_multistart().
-        "periodogram_multistart" uses a C linear circular-orbit periodogram to
-        choose period starts before the eccentric scan and Nelder-Mead polish.
 
     If reject_outlier is True, the optimizer minimizes the drop-one objective:
     for each likelihood call, the largest-residual epoch is ignored. This is a
@@ -168,9 +172,9 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
     L_double = L.astype(np.double)
     U_double = U.astype(np.double)
     
-    optimizer = optimizer.lower()
+    optimizer = "periodogram_multistart" if optimizer is None else optimizer.lower()
 
-    if optimizer in ("annealing", "default", "simulated_annealing"):
+    if optimizer in ("annealing", "simulated_annealing"):
         results_array = np.empty(3, dtype = np.double)
         if reject_outlier:
             c_funcs.run_astfit_reject_outlier(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)))    
@@ -185,14 +189,21 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         c_funcs.run_astfit_grid_multistart(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
         return results_array[:3]
 
-    if optimizer in ("periodogram_multistart", "periodogram", "pg_multistart"):
+    if optimizer in ("periodogram_multistart", "periodogram", "pg_multistart", "default", "fast", "grid_70pct_nm_loose"):
         if not hasattr(c_funcs, "run_astfit_periodogram_multistart"):
             raise ValueError('optimizer="periodogram_multistart" requires a compiled C library with run_astfit_periodogram_multistart().')
         results_array = np.empty(4, dtype = np.double)
         c_funcs.run_astfit_periodogram_multistart(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
         return results_array[:3]
 
-    raise ValueError('optimizer must be "annealing", "multistart", or "periodogram_multistart".')
+    if optimizer in ("periodogram_multistart_full", "periodogram_full", "pg_multistart_full", "full"):
+        if not hasattr(c_funcs, "run_astfit_periodogram_multistart_full"):
+            raise ValueError('optimizer="periodogram_multistart_full" requires a compiled C library with run_astfit_periodogram_multistart_full().')
+        results_array = np.empty(4, dtype = np.double)
+        c_funcs.run_astfit_periodogram_multistart_full(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
+        return results_array[:3]
+
+    raise ValueError('optimizer must be "periodogram_multistart", "periodogram_multistart_full", "annealing", or "multistart".')
     
     
 def fit_orbital_solution_nonlinear_with_parallax_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
@@ -1056,7 +1067,7 @@ def fit_5par_solution_only(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned =
     return [mu[0], mu[1], mu[2], mu[3], mu[4], sigma_mu[0], sigma_mu[1], sigma_mu[2], sigma_mu[3], sigma_mu[4], ruwe, sigma5d_max]
         
 
-def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="annealing"):
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="periodogram_multistart"):
     '''
     Fit 1D epoch astrometry with the astrometric cascade.
 
@@ -1070,8 +1081,11 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     If show_residuals is True, residual plots are made only if an orbital model
     is actually fit. If reject_outlier is True, the orbital fit minimizes a
     drop-one objective where the largest-residual epoch is ignored at each
-    likelihood call. optimizer is "annealing" or "multistart"; multistart
-    requires run_astfit_grid_multistart in the compiled C library.
+    likelihood call. optimizer defaults to "periodogram_multistart", which uses
+    the faster grid_70pct_nm_loose C settings. Use
+    optimizer="periodogram_multistart_full" for the original denser
+    periodogram grid and tighter Nelder-Mead polish, or optimizer="annealing"
+    for the original adaptive simulated annealing optimizer.
 
     Returns
     -------
