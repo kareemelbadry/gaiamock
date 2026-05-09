@@ -147,6 +147,8 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         "annealing" uses the original adaptive simulated annealing optimizer.
         "multistart" uses the deterministic C grid/multistart optimizer and
         requires a compiled C library with run_astfit_grid_multistart().
+        "periodogram_multistart" uses a C linear circular-orbit periodogram to
+        choose period starts before the eccentric scan and Nelder-Mead polish.
 
     If reject_outlier is True, the optimizer minimizes the drop-one objective:
     for each likelihood call, the largest-residual epoch is ignored. This is a
@@ -183,7 +185,14 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         c_funcs.run_astfit_grid_multistart(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
         return results_array[:3]
 
-    raise ValueError('optimizer must be "annealing" or "multistart".')
+    if optimizer in ("periodogram_multistart", "periodogram", "pg_multistart"):
+        if not hasattr(c_funcs, "run_astfit_periodogram_multistart"):
+            raise ValueError('optimizer="periodogram_multistart" requires a compiled C library with run_astfit_periodogram_multistart().')
+        results_array = np.empty(4, dtype = np.double)
+        c_funcs.run_astfit_periodogram_multistart(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
+        return results_array[:3]
+
+    raise ValueError('optimizer must be "annealing", "multistart", or "periodogram_multistart".')
     
     
 def fit_orbital_solution_nonlinear_with_parallax_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 

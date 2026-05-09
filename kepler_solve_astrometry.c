@@ -11,6 +11,7 @@ On my local cluster, I compiled with:
 #include <gsl/gsl_vector.h>
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
+#include <gsl/gsl_errno.h>
 #define PI 3.14159265358979
 
 
@@ -724,6 +725,125 @@ void scan_circular_period_grid(double* t_ast_yr, double* psi, double *plx_factor
     }
 }
 
+double linear_circular_periodogram_chi2_skip(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, int n_obs, double period, int skip_idx, int* worst_idx) {
+    gsl_matrix* normal = gsl_matrix_calloc(9, 9);
+    gsl_vector* rhs = gsl_vector_calloc(9);
+    gsl_vector* mu = gsl_vector_alloc(9);
+    gsl_permutation* perm = gsl_permutation_alloc(9);
+
+    for (int j = 0; j < n_obs; j++) {
+        if (j == skip_idx) {
+            continue;
+        }
+        double s = sin(psi[j]);
+        double c = cos(psi[j]);
+        double phase = 2.0 * PI * t_ast_yr[j] * 365.25 / period;
+        double cp = cos(phase);
+        double sp = sin(phase);
+        double col[9] = {
+            s,
+            t_ast_yr[j] * s,
+            c,
+            t_ast_yr[j] * c,
+            plx_factor[j],
+            cp * s,
+            sp * s,
+            cp * c,
+            sp * c
+        };
+        double w = 1.0 / (ast_err[j] * ast_err[j]);
+        for (int a = 0; a < 9; a++) {
+            gsl_vector_set(rhs, a, gsl_vector_get(rhs, a) + w * col[a] * ast_obs[j]);
+            for (int b = 0; b < 9; b++) {
+                gsl_matrix_set(normal, a, b, gsl_matrix_get(normal, a, b) + w * col[a] * col[b]);
+            }
+        }
+    }
+
+    int signum;
+    gsl_error_handler_t* old_handler = gsl_set_error_handler_off();
+    int status = gsl_linalg_LU_decomp(normal, perm, &signum);
+    if (status == GSL_SUCCESS) {
+        status = gsl_linalg_LU_solve(normal, perm, rhs, mu);
+    }
+    gsl_set_error_handler(old_handler);
+
+    double chi2 = INFINITY;
+    if (status == GSL_SUCCESS) {
+        chi2 = 0.0;
+        double worst_chi2 = -1.0;
+        int local_worst_idx = -1;
+        for (int j = 0; j < n_obs; j++) {
+            if (j == skip_idx) {
+                continue;
+            }
+            double s = sin(psi[j]);
+            double c = cos(psi[j]);
+            double phase = 2.0 * PI * t_ast_yr[j] * 365.25 / period;
+            double cp = cos(phase);
+            double sp = sin(phase);
+            double col[9] = {
+                s,
+                t_ast_yr[j] * s,
+                c,
+                t_ast_yr[j] * c,
+                plx_factor[j],
+                cp * s,
+                sp * s,
+                cp * c,
+                sp * c
+            };
+            double pred = 0.0;
+            for (int a = 0; a < 9; a++) {
+                pred += col[a] * gsl_vector_get(mu, a);
+            }
+            double resid = (ast_obs[j] - pred) / ast_err[j];
+            double chi2_term = resid * resid;
+            chi2 += chi2_term;
+            if (chi2_term > worst_chi2) {
+                worst_chi2 = chi2_term;
+                local_worst_idx = j;
+            }
+        }
+        if (worst_idx != NULL) {
+            *worst_idx = local_worst_idx;
+        }
+    }
+
+    gsl_permutation_free(perm);
+    gsl_vector_free(mu);
+    gsl_vector_free(rhs);
+    gsl_matrix_free(normal);
+    return chi2;
+}
+
+double linear_circular_periodogram_chi2(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, int n_obs, double period, int reject_outlier) {
+    if (reject_outlier && n_obs > 13) {
+        int worst_idx = -1;
+        double chi2 = linear_circular_periodogram_chi2_skip(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, period, -1, &worst_idx);
+        if (isfinite(chi2) && worst_idx >= 0) {
+            return linear_circular_periodogram_chi2_skip(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, period, worst_idx, NULL);
+        }
+        return chi2;
+    }
+    return linear_circular_periodogram_chi2_skip(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, period, -1, NULL);
+}
+
+void scan_circular_periodogram_grid(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double p_min, double p_max, int n_obs, int reject_outlier, int n_period, AstfitCandidate* rows, int* n_rows) {
+    double log_p_min = log(p_min);
+    double log_p_max = log(p_max);
+    for (int ip = 0; ip < n_period; ip++) {
+        double frac = (n_period == 1) ? 0.0 : ((double)ip / (double)(n_period - 1));
+        double period = exp(log_p_min + frac * (log_p_max - log_p_min));
+        double chi2 = linear_circular_periodogram_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, period, reject_outlier);
+        rows[*n_rows].chi2 = chi2;
+        rows[*n_rows].period = period;
+        rows[*n_rows].phi_p = 0.0;
+        rows[*n_rows].ecc = 0.0;
+        *n_rows += 1;
+    }
+}
+
 /* Deterministic C-only nonlinear search for (P, phi_p, e): broad/short circular period grids,
    eccentric phase scans around the best distinct periods, then Nelder-Mead polish of the best starts.
    results[0:4] = P, phi_p, e, chi2. */
@@ -812,6 +932,99 @@ void run_astfit_grid_multistart(double* t_ast_yr, double* psi, double *plx_facto
     results[3] = best_chi2;
 
     free(circular_rows);
+    free(periods);
+    free(candidates);
+    free(starts);
+}
+
+/* Deterministic C-only nonlinear search seeded by a linear circular-orbit periodogram.
+   The circular phase is absorbed by the linear Thiele-Innes coefficients, so this scores
+   each trial period once, then keeps the existing eccentric phase scan and Nelder-Mead polish.
+   results[0:4] = P, phi_p, e, chi2. */
+void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    int n_period = 260;
+    int n_short_period = 800;
+    int n_ecc_phase = 48;
+    int max_periods = 32;
+    int max_candidates = 256;
+    int max_starts = 64;
+    double short_period_max = fmin(U[0], 300.0);
+    double ecc_grid[6] = {0.0, 0.2, 0.4, 0.6, 0.8, 0.95};
+
+    int max_rows = n_period + ((short_period_max > L[0]) ? n_short_period : 0) + 8;
+    AstfitCandidate* periodogram_rows = (AstfitCandidate*)malloc(max_rows * sizeof(AstfitCandidate));
+    int n_rows = 0;
+    scan_circular_periodogram_grid(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L[0], U[0], n_obs, reject_outlier, n_period, periodogram_rows, &n_rows);
+    if (short_period_max > L[0]) {
+        scan_circular_periodogram_grid(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L[0], short_period_max, n_obs, reject_outlier, n_short_period, periodogram_rows, &n_rows);
+    }
+    qsort(periodogram_rows, n_rows, sizeof(AstfitCandidate), compare_astfit_candidate);
+
+    double* periods = (double*)malloc(max_periods * sizeof(double));
+    int n_periods = 0;
+    for (int i = 0; i < n_rows && n_periods < 24; i++) {
+        if (astfit_period_is_distinct(periodogram_rows[i].period, periods, n_periods, 0.025)) {
+            periods[n_periods] = periodogram_rows[i].period;
+            n_periods++;
+        }
+    }
+    for (int i = 0; i < 8 && n_periods < max_periods; i++) {
+        double period = U[0] * exp(-((double)i / 7.0));
+        if (period >= L[0] && period <= U[0] && astfit_period_is_distinct(period, periods, n_periods, 0.01)) {
+            periods[n_periods] = period;
+            n_periods++;
+        }
+    }
+
+    AstfitCandidate* candidates = (AstfitCandidate*)malloc(max_candidates * sizeof(AstfitCandidate));
+    int n_candidates = 0;
+    for (int i = 0; i < n_rows && i < 128; i++) {
+        insert_astfit_candidate(candidates, &n_candidates, max_candidates, periodogram_rows[i].chi2, periodogram_rows[i].period, periodogram_rows[i].phi_p, periodogram_rows[i].ecc);
+    }
+    for (int ip = 0; ip < n_periods; ip++) {
+        double period = periods[ip];
+        for (int ie = 0; ie < 6; ie++) {
+            double ecc = ecc_grid[ie];
+            if (ecc < L[2] || ecc > U[2]) {
+                continue;
+            }
+            for (int iph = 0; iph < n_ecc_phase; iph++) {
+                double phi_p = L[1] + ((double)iph / (double)n_ecc_phase) * (U[1] - L[1]);
+                double chi2 = eval_astfit_candidate(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, period, phi_p, ecc);
+                insert_astfit_candidate(candidates, &n_candidates, max_candidates, chi2, period, phi_p, ecc);
+            }
+        }
+    }
+
+    AstfitCandidate* starts = (AstfitCandidate*)malloc(max_starts * sizeof(AstfitCandidate));
+    int n_starts = 0;
+    for (int i = 0; i < n_candidates && n_starts < max_starts; i++) {
+        if (astfit_start_is_distinct(candidates[i], starts, n_starts)) {
+            starts[n_starts] = candidates[i];
+            n_starts++;
+        }
+    }
+
+    double best_chi2 = INFINITY;
+    double best_x[3] = {(U[0] + L[0]) / 2.0, (U[1] + L[1]) / 2.0, (U[2] + L[2]) / 2.0};
+    for (int i = 0; i < n_starts; i++) {
+        double x[3] = {starts[i].period, starts[i].phi_p, starts[i].ecc};
+        polish_astfit_start_nelder_mead(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, n_obs, reject_outlier, x);
+        double chi2 = eval_astfit_candidate(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier, x[0], x[1], x[2]);
+        if (chi2 < best_chi2) {
+            best_chi2 = chi2;
+            best_x[0] = x[0];
+            best_x[1] = x[1];
+            best_x[2] = x[2];
+        }
+    }
+
+    results[0] = best_x[0];
+    results[1] = best_x[1];
+    results[2] = best_x[2];
+    results[3] = best_chi2;
+
+    free(periodogram_rows);
     free(periods);
     free(candidates);
     free(starts);
