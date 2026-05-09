@@ -1915,6 +1915,9 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
     gsl_vector *mu = gsl_vector_alloc(9); // Solution vector
     gsl_vector *Lambda_pred = gsl_vector_alloc(n_obs); // Predicted lambda
     gsl_matrix *temp = gsl_matrix_alloc(9, n_obs); // Temporary matrix for intermediate calculations
+    gsl_matrix *normal_matrix = gsl_matrix_alloc(9, 9);
+    gsl_matrix *normal_inverse = gsl_matrix_alloc(9, 9);
+    gsl_permutation *perm = gsl_permutation_alloc(9);
 
     // Compute ivar and fill Cinv
     for (int j = 0; j < n_obs; j++) {
@@ -1949,28 +1952,126 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
     gsl_vector_view ast_obs_view = gsl_vector_view_array(ast_obs, n_obs); // Create a vector view of ast_obs
     gsl_blas_dgemv(CblasNoTrans, 1.0, Cinv, &ast_obs_view.vector, 0.0, Cinv_ast_obs);
     gsl_blas_dgemv(CblasNoTrans, 1.0, Mt, Cinv_ast_obs, 0.0, MtCinvY);
-    gsl_linalg_HH_solve(MtCinvM, MtCinvY, mu);
+
+    gsl_matrix_memcpy(normal_matrix, MtCinvM);
+    int signum;
+    int lu_status = gsl_linalg_LU_decomp(normal_matrix, perm, &signum);
+    if (lu_status == 0) {
+        lu_status = gsl_linalg_LU_solve(normal_matrix, perm, MtCinvY, mu);
+    }
+    if (lu_status == 0) {
+        lu_status = gsl_linalg_LU_invert(normal_matrix, perm, normal_inverse);
+    }
+
+    if (lu_status != 0) {
+        double full_chi2_array[10];
+        get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, full_chi2_array);
+
+        double running_worst = 0.0;
+        int worst_index = 0;
+        for (int j = 0; j < n_obs; j++) {
+            double pred = 0.0;
+            for (int k = 0; k < 9; k++) {
+                pred += gsl_matrix_get(M, j, k) * full_chi2_array[k + 1];
+            }
+            double resid_j = pred - ast_obs[j];
+            double chi2_j = resid_j * resid_j * ivar[j];
+            if (chi2_j > running_worst) {
+                running_worst = chi2_j;
+                worst_index = j;
+            }
+        }
+
+        double* ast_err_new = (double*)malloc(n_obs * sizeof(double));
+        for (int i = 0; i < n_obs; i++) {
+            ast_err_new[i] = ast_err[i];
+        }
+        ast_err_new[worst_index] = 1e9; // turn off the worst data point
+        get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err_new, P, phi_p, ecc, chi2_array);
+        free(ast_err_new);
+
+        gsl_matrix_free(M);
+        gsl_matrix_free(Mt);
+        gsl_matrix_free(Cinv);
+        gsl_matrix_free(MtCinvM);
+        gsl_vector_free(MtCinvY);
+        gsl_vector_free(mu);
+        gsl_vector_free(Lambda_pred);
+        gsl_matrix_free(temp);
+        gsl_vector_free(Cinv_ast_obs);
+        gsl_matrix_free(normal_matrix);
+        gsl_matrix_free(normal_inverse);
+        gsl_permutation_free(perm);
+        return;
+    }
+
     gsl_blas_dgemv(CblasNoTrans, 1.0, M, mu, 0.0, Lambda_pred);
     
-    double chi2 = 0.0; 
+    double chi2_j = 0.0; 
     double running_worst = 0.0; 
     int worst_index = 0;
     for (int j = 0; j < n_obs; j++) {
-        chi2 = ((gsl_vector_get(Lambda_pred, j) - ast_obs[j]) * (gsl_vector_get(Lambda_pred, j) - ast_obs[j])) / (ast_err[j] * ast_err[j]);
-        if (chi2 > running_worst) {
-            running_worst = chi2;
+        chi2_j = ((gsl_vector_get(Lambda_pred, j) - ast_obs[j]) * (gsl_vector_get(Lambda_pred, j) - ast_obs[j])) / (ast_err[j] * ast_err[j]);
+        if (chi2_j > running_worst) {
+            running_worst = chi2_j;
             worst_index = j;
         }
     }
-    
-    // make a new error vector 
-    double* ast_err_new = (double*)malloc(n_obs * sizeof(double));
-    for (int i = 0; i < n_obs; i++) {
-        ast_err_new[i] = ast_err[i];
-    }
-    ast_err_new[worst_index] = 1e9; // turn off the worst data point 
 
-    get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err_new, P, phi_p, ecc, chi2_array);
+    double xworst[9];
+    for (int k = 0; k < 9; k++) {
+        xworst[k] = gsl_matrix_get(M, worst_index, k);
+    }
+
+    double Cx[9];
+    for (int k = 0; k < 9; k++) {
+        Cx[k] = 0.0;
+        for (int l = 0; l < 9; l++) {
+            Cx[k] += gsl_matrix_get(normal_inverse, k, l) * xworst[l];
+        }
+    }
+
+    double leverage = 0.0;
+    for (int k = 0; k < 9; k++) {
+        leverage += xworst[k] * Cx[k];
+    }
+    leverage *= ivar[worst_index];
+
+    double denom = 1.0 - leverage;
+    if (denom <= 1e-10 || !isfinite(denom)) {
+        double* ast_err_new = (double*)malloc(n_obs * sizeof(double));
+        for (int i = 0; i < n_obs; i++) {
+            ast_err_new[i] = ast_err[i];
+        }
+        ast_err_new[worst_index] = 1e9; // turn off the worst data point
+        get_chi2_astrometry(n_obs, t_ast_yr, psi, plx_factor, ast_obs, ast_err_new, P, phi_p, ecc, chi2_array);
+        free(ast_err_new);
+    } else {
+        double mu_reject[9];
+        double residual = ast_obs[worst_index] - gsl_vector_get(Lambda_pred, worst_index);
+        double scale = ivar[worst_index] * residual / denom;
+        for (int k = 0; k < 9; k++) {
+            mu_reject[k] = gsl_vector_get(mu, k) - Cx[k] * scale;
+        }
+
+        double chi2_reject = 0.0;
+        for (int j = 0; j < n_obs; j++) {
+            if (j == worst_index) {
+                continue;
+            }
+            double pred = 0.0;
+            for (int k = 0; k < 9; k++) {
+                pred += gsl_matrix_get(M, j, k) * mu_reject[k];
+            }
+            double resid_j = pred - ast_obs[j];
+            chi2_reject += resid_j * resid_j * ivar[j];
+        }
+
+        chi2_array[0] = chi2_reject;
+        for (int k = 0; k < 9; k++) {
+            chi2_array[k + 1] = mu_reject[k];
+        }
+    }
     
  
     // Cleanup
@@ -1983,7 +2084,9 @@ void get_chi2_astrometry_reject_outliers(int n_obs, double *t_ast_yr, double *ps
     gsl_vector_free(Lambda_pred);
     gsl_matrix_free(temp);
     gsl_vector_free(Cinv_ast_obs);
-    free(ast_err_new);
+    gsl_matrix_free(normal_matrix);
+    gsl_matrix_free(normal_inverse);
+    gsl_permutation_free(perm);
 }
 
 /* This is like run_astfit(), except it ignores the worst datapoint for each likelihood call. 
