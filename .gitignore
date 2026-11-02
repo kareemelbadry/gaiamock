@@ -6,7 +6,5 @@ wheelhouse/
 *.so
 __pycache__/
 .ipynb_checkpoints/
-
-# downloaded data (see `gaiamock-download`)
-healpix_scans/
-healpix_16_med_ruwe.npz
+*.npz
+*.zip
