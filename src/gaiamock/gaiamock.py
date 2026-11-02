@@ -5,6 +5,7 @@ import ctypes
 from astropy.table import Table
 import healpy as hp
 import joblib
+from .data import data_path
 
 def al_uncertainty_per_ccd_interp(G):
     '''
@@ -744,7 +745,7 @@ def get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag):
     
     hpxs =  hp.ang2pix(16, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
    
-    tmp = np.load(os.path.join(os.path.dirname(__file__), 'healpix_16_med_ruwe.npz'))
+    tmp = np.load(data_path('healpix_16_med_ruwe.npz'))
     med_ruwe = tmp['med_ruwe']
     tmp.close()
     
@@ -803,8 +804,12 @@ def get_gost_one_position(ra, dec, data_release):
     ra and dec: coordinates of interest in degrees (floats)
     data_release: 'dr3', 'dr4', or 'dr5'
     '''
-    num =  hp.ang2pix(64, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
-    tab = Table.read(os.path.join(os.path.dirname(__file__), 'healpix_scans/healpix_64_%d.fits' % num))
+    if binned:
+        num =  hp.ang2pix(64, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
+        tab = Table.read(data_path('healpix_scans', 'healpix_64_%d.fits' % num))
+    else:
+        num =  hp.ang2pix(16, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
+        tab = Table.read(data_path('healpix_scans', 'healpix_16_%d.fits' % num))
     jd = fetch_table_element('ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]', tab)
     
     if data_release == 'dr4':
