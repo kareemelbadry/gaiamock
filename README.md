@@ -34,9 +34,9 @@ in a terminal. By default this puts the data in ~/.gaiamock. To keep it somewher
 
 If the download doesn't work, download healpix_scans.zip in a browser from [this](https://caltech.box.com/s/4f7q6qdh0bku881bzvzxc4cm5u0902cf) link and then run `gaiamock-download path/to/healpix_scans.zip` to unpack it into the right place. A healpix_scans/ directory next to gaiamock.py (where older versions of these instructions put it) also still works.
 
-(4) You are ready to go! Some basic functionality is demonstrated in the demo.ipynb notebook. You can check that everything works with `pip install -e ".[test]"` and then `pytest`. 
+(4) You are ready to go! Some basic functionality is demonstrated in the docs/demo.ipynb notebook. You can check that everything works with `pip install -e ".[test]"` and then `pytest`. 
 
-A simple bash submission script to run on a cluster is provided in example_bash_submission.py. That reproduces Fig 13 of the paper. 
+A simple bash submission script to run on a cluster is provided in docs/example_bash_submission.py. That reproduces Fig 13 of the paper. 
 
 This code is regularly updated and includes functionality beyond what is shown in the demo. If you have questions, or if you spot a bug, please contact me at kelbadry@caltech.edu. 
 
