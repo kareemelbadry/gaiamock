@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaiamock"
+version = "1.0.0"
+description = "Simulate Gaia epoch astrometry and fit astrometric binary orbits"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Kareem El-Badry", email = "kelbadry@caltech.edu" },
+    { name = "Tom Wagg", email = "tomjwagg@gmail.com" },            # made the package pip installable but didn't contribute to the code
+]
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "astropy",
+    "healpy",
+    "joblib",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+
+[project.optional-dependencies]
+mcmc = ["emcee", "scipy"]   # mcmc_fit_with_* functions
+dust = ["mwdust"]           # simulate_many_realizations_* with do_dust=True
+all = ["gaiamock[mcmc,dust]"]
+test = ["pytest"]
+
+[project.scripts]
+gaiamock-download = "gaiamock.data:main"
+
+[project.urls]
+Homepage = "https://github.com/kareemelbadry/gaiamock"
+Issues = "https://github.com/kareemelbadry/gaiamock/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["gaiamock"]
+
+[tool.setuptools.exclude-package-data]
+gaiamock = ["*.c"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Binary wheels with GSL bundled inside, built by .github/workflows/wheels.yml, so that
+# `pip install gaiamock` from PyPI doesn't need GSL. The wheels are tagged py3-none-<platform>
+# (see setup.py), so one build per platform covers every Python version.
+[tool.cibuildwheel]
+build = ["cp312-manylinux_*", "cp312-macosx_*"]
+archs = ["native"]
+test-extras = ["test"]
+test-command = "pytest {project}/tests"
+
+[tool.cibuildwheel.linux]
+# manylinux_2_28 is AlmaLinux 8, where gsl-devel lives in the powertools repo
+before-all = "dnf install -y gsl-devel || dnf install -y --enablerepo=powertools gsl-devel"
+
+[tool.cibuildwheel.macos]
+before-all = "brew install gsl"
