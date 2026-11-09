@@ -1,0 +1,4 @@
+include COPYING THIRD_PARTY_NOTICES
+include vendor/gsl-2.8.tar.gz
+include tools/*.py tools/*.sh
+include .github/workflows/wheels.yml

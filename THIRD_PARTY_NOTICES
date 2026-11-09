@@ -1,0 +1,46 @@
+gaiamock release licensing
+=========================
+
+The gaiamock release distribution, including its GSL-linked binary library,
+is distributed under the GNU General Public License, version 3 or later.
+The full license is in COPYING.
+
+The original MIT notice for gaiamock-authored source is retained in LICENSE.
+Those source files remain available under that permissive license; the MIT
+notice does not replace the GPL terms applicable to the combined distribution.
+
+GNU Scientific Library (GSL)
+============================
+
+The official binary wheels bundle libgsl and libgslcblas from unmodified
+GNU GSL 2.8, built from the upstream source archive:
+
+  https://ftp.gnu.org/gnu/gsl/gsl-2.8.tar.gz
+  SHA256: 6a99eeed15632c6354895b1dd542ed5a855c0f15d9ad1326c6fe2b2c9e423190
+
+GSL is copyright its respective authors, as identified in the source files
+and AUTHORS in the upstream archive, and is licensed under GPL version 3
+or later. See https://www.gnu.org/software/gsl/ and COPYING.
+
+Corresponding source and rebuilding
+===================================
+
+Each official wheel contains gaiamock/_sources/gaiamock-<version>-source.tar.gz.
+This archive includes the gaiamock Python and C sources, build configuration,
+release workflow, build scripts, license notices, and the complete, unmodified
+GSL 2.8 source archive (including its copyright notices and license).
+The source distribution also includes these files. No separate source request
+or download is necessary to obtain this source from the release artifacts.
+
+To rebuild, extract the corresponding-source archive and enter its directory:
+
+  export GSL_DIR=/tmp/gaiamock-gsl-2.8
+  bash tools/build_gsl.sh
+  python3 tools/prepare_release_sources.py
+  python3 -m pip install build
+  python3 -m build
+
+A C compiler, make, and the standard platform build tools are required.
+The release workflow and pyproject.toml document the platform settings and
+cibuildwheel repair steps used to bundle the shared libraries in official
+wheels. For the complete release process, see .github/workflows/wheels.yml.

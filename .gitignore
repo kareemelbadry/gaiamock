@@ -8,3 +8,5 @@ __pycache__/
 .ipynb_checkpoints/
 *.npz
 *.zip
+vendor/gsl-*.tar.gz
+src/gaiamock/_sources/

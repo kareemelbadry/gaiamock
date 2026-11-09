@@ -1,6 +1,12 @@
 # gaiamock
 
-This is a package for simulating Gaia astrometry at the epoch level. To install it, do the following: 
+This is a package for simulating Gaia astrometry at the epoch level. Install it from PyPI with:
+
+```
+pip install gaiamock
+```
+
+Binary wheels include GSL and are available for Linux (Intel/AMD and ARM64) and macOS 15 or later (Intel and Apple Silicon). After installation, download the scanning-law data as described in step (3) below. If pip needs to build from source, or you want to install the development version, follow steps (1) and (2).
 
 (1) If you don't already have it installed, install [GSL](https://www.gnu.org/software/gsl/), which is needed to compile gaiamock's C code. For example:
 
@@ -43,6 +49,8 @@ If you already downloaded the data for an older version of gaiamock, you don't n
 A simple bash submission script to run on a cluster is provided in docs/example_bash_submission.py. That reproduces Fig 13 of the paper. 
 
 This code is regularly updated and includes functionality beyond what is shown in the demo. If you have questions, or if you spot a bug, please contact me at kelbadry@caltech.edu. 
+
+The release distribution is licensed under GPL-3.0-or-later because it links to GNU GSL. The original MIT notice for gaiamock-authored source is retained. Each official wheel includes the complete corresponding source for gaiamock and its bundled GSL in `gaiamock/_sources/`. See [THIRD_PARTY_NOTICES](https://github.com/kareemelbadry/gaiamock/blob/main/THIRD_PARTY_NOTICES) for license details and rebuild instructions.
 
 # A modified version to predict RUWE more reliably for small orbits and single stars
 

@@ -5,6 +5,9 @@
 # publisher for the gaiamock project on pypi.org (workflow: wheels.yml, environment: pypi).
 name: Build and publish
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -23,10 +26,12 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
-      # Homebrew's GSL is built for the runner's macOS version, so the wheel can't target anything older
+      - run: python3 tools/prepare_release_sources.py
+      # Keep the existing minimum macOS version for the initial release.
       - if: runner.os == 'macOS'
         run: echo "MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1).0" >> "$GITHUB_ENV"
       - uses: pypa/cibuildwheel@v4.3.0
+      - run: python3 tools/check_release.py wheelhouse/*.whl
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}
@@ -36,7 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python3 tools/prepare_release_sources.py
       - run: pipx run build --sdist
+      - run: python3 tools/check_release.py dist/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: sdist

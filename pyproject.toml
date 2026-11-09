@@ -7,8 +7,8 @@ name = "gaiamock"
 version = "1.0.0"
 description = "Simulate Gaia epoch astrometry and fit astrometric binary orbits"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "COPYING", "THIRD_PARTY_NOTICES"]
 authors = [
     { name = "Kareem El-Badry", email = "kelbadry@caltech.edu" },
     { name = "Tom Wagg", email = "tomjwagg@gmail.com" },            # made the package pip installable but didn't contribute to the code
@@ -50,6 +50,9 @@ packages = ["gaiamock"]
 [tool.setuptools.exclude-package-data]
 gaiamock = ["*.c"]
 
+[tool.setuptools.package-data]
+gaiamock = ["_sources/*.tar.gz"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
@@ -61,10 +64,5 @@ build = ["cp312-manylinux_*", "cp312-macosx_*"]
 archs = ["native"]
 test-extras = ["test"]
 test-command = "pytest {project}/tests"
-
-[tool.cibuildwheel.linux]
-# manylinux_2_28 is AlmaLinux 8, where gsl-devel lives in the powertools repo
-before-all = "dnf install -y gsl-devel || dnf install -y --enablerepo=powertools gsl-devel"
-
-[tool.cibuildwheel.macos]
-before-all = "brew install gsl"
+environment = { GSL_DIR = "/tmp/gaiamock-gsl-2.8" }
+before-all = "bash {project}/tools/build_gsl.sh"
