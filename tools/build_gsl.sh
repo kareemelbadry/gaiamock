@@ -18,12 +18,12 @@ build_dir=$(mktemp -d "${TMPDIR:-/tmp}/gaiamock-gsl.XXXXXX")
 trap 'rm -rf "$build_dir"' EXIT
 tar -xzf "$archive" -C "$build_dir"
 cd "$build_dir/gsl-2.8"
-configure_args=()
+configure_args=(--prefix="$gsl_prefix" --disable-static --enable-shared)
 # GSL's bundled config.sub uses the GNU name aarch64 for Apple Silicon.
 if [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]]; then
     configure_args+=(--build=aarch64-apple-darwin)
 fi
-./configure --prefix="$gsl_prefix" --disable-static --enable-shared "${configure_args[@]}"
+./configure "${configure_args[@]}"
 make -j "${GAIAMOCK_BUILD_JOBS:-4}"
 make install
 "$gsl_prefix/bin/gsl-config" --version
