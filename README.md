@@ -32,7 +32,11 @@ gaiamock-download
 ```
 in a terminal. By default this puts the data in ~/.gaiamock. To keep it somewhere else, set the environment variable `GAIAMOCK_DATA_DIR` to that directory, both when downloading and when using gaiamock. `gaiamock-download --where` prints where gaiamock looks for the data.
 
-If the download doesn't work, download healpix_scans.zip in a browser from [this](https://caltech.box.com/s/4f7q6qdh0bku881bzvzxc4cm5u0902cf) link and then run `gaiamock-download path/to/healpix_scans.zip` to unpack it into the right place. A healpix_scans/ directory next to gaiamock.py (where older versions of these instructions put it) also still works.
+If the download doesn't work, download healpix_scans.zip in a browser from [this](https://caltech.box.com/s/4f7q6qdh0bku881bzvzxc4cm5u0902cf) link and then run `gaiamock-download path/to/healpix_scans.zip` to unpack it into the right place.
+
+If you already downloaded the data for an older version of gaiamock, you don't need to download it again:
+- if you installed from your existing clone with `pip install -e .`, the healpix_scans/ directory (and healpix_16_med_ruwe.npz) at the top of the clone, where older versions of these instructions put them, is still found automatically.
+- otherwise, set `GAIAMOCK_DATA_DIR=/path/to/old/gaiamock` (the directory containing healpix_scans/), or move healpix_scans/ into ~/.gaiamock.
 
 (4) You are ready to go! Some basic functionality is demonstrated in the docs/demo.ipynb notebook. You can check that everything works with `pip install -e ".[test]"` and then `pytest`. 
 
