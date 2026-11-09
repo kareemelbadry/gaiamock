@@ -6,8 +6,9 @@ so it is downloaded once by running `gaiamock-download` in a terminal (or
 gaiamock.download_data() in python). Data files are looked for in:
 
   1. $GAIAMOCK_DATA_DIR if that environment variable is set, otherwise it is stored in ~/.gaiamock/
-  2. the gaiamock package directory, i.e. next to gaiamock.py (where the original instructions
-     said to unzip healpix_scans.zip)
+  2. the gaiamock package directory, i.e. next to gaiamock.py
+  3. for source checkouts (e.g. `pip install -e .`), the top of the repository, where the original instructions
+     said to unzip healpix_scans.zip
 
 By default, downloads will be stored in (1)
 '''
@@ -27,6 +28,43 @@ HEALPIX_SCANS_BROWSER_URL = 'https://caltech.box.com/s/4f7q6qdh0bku881bzvzxc4cm5
 N_HEALPIX_SCANS = 49152
 
 
+def get_source_checkout_root(package_dir=None):
+    """Return the top of the gaiamock repository if gaiamock is running from a source checkout, otherwise None.
+
+    A checkout is recognised by the src/ layout (<root>/src/gaiamock) plus a <root>/pyproject.toml for the gaiamock
+    project. A regular install lives in site-packages/gaiamock, which never matches, so no directories above
+    site-packages are searched.
+
+    Parameters
+    ----------
+    package_dir : pathlib.Path, optional
+        The gaiamock package directory (default: the directory containing this file).
+
+    Returns
+    -------
+    root : pathlib.Path or None
+        The repository root, or None if this isn't a source checkout.
+    """
+    package_dir = Path(package_dir) if package_dir else PACKAGE_DIR
+    if package_dir.parent.name != 'src':
+        return None
+    root = package_dir.parent.parent
+    try:
+        pyproject = (root / 'pyproject.toml').read_text()
+    except OSError:
+        return None
+    return root if 'name = "gaiamock"' in pyproject else None
+
+
+def get_search_dirs():
+    """Return the directories that data_path() searches, in order (see the top of this file)."""
+    search_dirs = [get_data_dir(), PACKAGE_DIR]
+    root = get_source_checkout_root()
+    if root is not None:
+        search_dirs.append(root)
+    return search_dirs
+
+
 def get_data_dir():
     if os.environ.get('GAIAMOCK_DATA_DIR'):
         return Path(os.environ['GAIAMOCK_DATA_DIR']).expanduser()
@@ -39,7 +77,9 @@ def data_path(*parts):
 
     This looks in the following locations, in order:
     1. $GAIAMOCK_DATA_DIR if that environment variable is set, otherwise ~/.gaiamock/
-    2. the gaiamock package directory, i.e. next to gaiamock.py (where the original instructions said to unzip healpix_scans.zip)
+    2. the gaiamock package directory, i.e. next to gaiamock.py
+    3. for source checkouts (e.g. `pip install -e .`), the top of the repository, where the original instructions said
+       to unzip healpix_scans.zip
 
     Parameters
     ----------
@@ -56,7 +96,7 @@ def data_path(*parts):
     FileNotFoundError
         If the file does not exist in any of the search directories.
     """
-    search_dirs = [get_data_dir(), PACKAGE_DIR]
+    search_dirs = get_search_dirs()
     for directory in search_dirs:
         path = directory.joinpath(*parts)
         if path.exists():
@@ -176,7 +216,7 @@ def main(argv=None):
         return
     data_dir = download_data(*args.files, data_dir=args.data_dir)
     print(f'Done: gaiamock data is in {data_dir}')
-    if data_dir.resolve() not in (get_data_dir().resolve(), PACKAGE_DIR):
+    if data_dir.resolve() not in [d.resolve() for d in get_search_dirs()]:
         print(f'gaiamock only looks in {get_data_dir()} by default, so set GAIAMOCK_DATA_DIR={data_dir}')
 
 
