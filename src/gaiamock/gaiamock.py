@@ -5,6 +5,7 @@ import ctypes
 from astropy.table import Table
 import healpy as hp
 import joblib
+from .data import data_path
 
 def al_uncertainty_per_ccd_interp(G):
     '''
@@ -616,7 +617,7 @@ def rescale_times_astrometry(jd, data_release):
     t_ast_yr = t_ast_day/365.25
     return t_ast_yr
     
-def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs, do_blending_noise = False, reject_10_percent = True):
+def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc, w, phot_g_mean_mag, f, data_release, c_funcs, do_blending_noise = False, reject_10_percent = True, binned = True):
     '''
     this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia. 
     ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
@@ -634,9 +635,11 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     f: flux ratio, F2/F1, in the G-band. 
     data_release: 'dr3', 'dr4', or 'dr5'
     c_funcs: from read_in_C_functions()
+    binned: if True, predict one measurement per FOV transit (averaging the ~8 CCDs). If False, predict the measurement from each CCD, with
+        uncertainties rescaled by the observed median ruwe at this sky position (see get_realistic_epoch_astrometry_errors()). Fit the result with binned = False too.
     '''
     
-    t = get_gost_one_position(ra, dec, data_release=data_release)
+    t = get_gost_one_position(ra, dec, data_release=data_release, binned=binned)
     
     # reject a random 10%
     if reject_10_percent:
@@ -644,13 +647,19 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
     t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
     
-    N_ccd_avg = 8
-    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+    if binned:
+        N_ccd_avg = 8
+        epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+        epoch_err_per_transit_expect = epoch_err_per_transit
     
-    if phot_g_mean_mag < 13:
-        extra_noise = np.random.uniform(0, 0.04)
-    else: 
-        extra_noise = 0
+        if phot_g_mean_mag < 13:
+            extra_noise = np.random.uniform(0, 0.04)
+        else: 
+            extra_noise = 0
+    else:
+        # the noise is rescaled by sky position, but the returned uncertainties are the expected ones
+        epoch_err_per_transit = get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag)
+        epoch_err_per_transit_expect = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)
 
     EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
     a_mas = get_a_mas(period, m1, m2, parallax)
@@ -670,7 +679,8 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
     Lambda_pred = Lambda_com + bias # binary motion
 
     Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
-    Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
+    if binned:
+        Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
     
     # extra noise for partially resolved sources
     if do_blending_noise:
@@ -678,10 +688,10 @@ def predict_astrometry_luminous_binary(ra, dec, parallax, pmra, pmdec, m1, m2, p
         blending_noise[np.abs(delta_eta) < 45] = 0 # 0 if \Delta \eta < resolution/2
         Lambda_pred += blending_noise
     
-    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
+    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit_expect*np.ones(len(Lambda_pred))
 
 
-def predict_astrometry_binary_in_terms_of_a0(ra, dec, parallax, pmra, pmdec, period, Tp, ecc, omega, inc, w, a0_mas, phot_g_mean_mag, data_release, c_funcs):
+def predict_astrometry_binary_in_terms_of_a0(ra, dec, parallax, pmra, pmdec, period, Tp, ecc, omega, inc, w, a0_mas, phot_g_mean_mag, data_release, c_funcs, binned = True):
     '''
     this function predicts the epoch-level astrometry for a binary as it would be observed by Gaia, in terms of a0 rather than m1 and m2 and f. It is only valid in the limit where the separation of the two stars is less than about 45 mas, so that the photocenter approximation works well. 
     
@@ -698,22 +708,30 @@ def predict_astrometry_binary_in_terms_of_a0(ra, dec, parallax, pmra, pmdec, per
     phot_g_mean_mag: G-band magnitude 
     data_release: 'dr3', 'dr4', or 'dr5'
     c_funcs: from read_in_C_functions()
+    binned: if True, predict one measurement per FOV transit (averaging the ~8 CCDs). If False, predict the measurement from each CCD, with
+        uncertainties rescaled by the observed median ruwe at this sky position (see get_realistic_epoch_astrometry_errors()). Fit the result with binned = False too.
     '''
     
-    t = get_gost_one_position(ra, dec, data_release=data_release)
+    t = get_gost_one_position(ra, dec, data_release=data_release, binned=binned)
     
     # reject a random 10%
     t = t[np.random.uniform(0, 1, len(t)) > 0.1]
     psi, plx_factor, jds = fetch_table_element(['scanAngle[rad]', 'parallaxFactorAlongScan', 'ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]'], t)
     t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
     
-    N_ccd_avg = 8
-    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+    if binned:
+        N_ccd_avg = 8
+        epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+        epoch_err_per_transit_expect = epoch_err_per_transit
     
-    if phot_g_mean_mag < 13:
-        extra_noise = np.random.uniform(0, 0.04)
-    else: 
-        extra_noise = 0
+        if phot_g_mean_mag < 13:
+            extra_noise = np.random.uniform(0, 0.04)
+        else: 
+            extra_noise = 0
+    else:
+        # the noise is rescaled by sky position, but the returned uncertainties are the expected ones
+        epoch_err_per_transit = get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag)
+        epoch_err_per_transit_expect = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)
 
     EE = solve_kepler_eqn_on_array(M = 2*np.pi/period * (t_ast_yr*365.25 - Tp), ecc = ecc, c_funcs = c_funcs)
  
@@ -732,9 +750,10 @@ def predict_astrometry_binary_in_terms_of_a0(ra, dec, parallax, pmra, pmdec, per
     Lambda_pred = Lambda_com + delta_eta # binary motion
 
     Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
-    Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
+    if binned:
+        Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
     
-    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
+    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit_expect*np.ones(len(Lambda_pred))
  
 def get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag):
     '''
@@ -744,7 +763,7 @@ def get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag):
     
     hpxs =  hp.ang2pix(16, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
    
-    tmp = np.load(os.path.join(os.path.dirname(__file__), 'healpix_16_med_ruwe.npz'))
+    tmp = np.load(data_path('healpix_16_med_ruwe.npz'))
     med_ruwe = tmp['med_ruwe']
     tmp.close()
     
@@ -797,14 +816,19 @@ def fetch_table_element(colname, table):
     return dat_
 
 
-def get_gost_one_position(ra, dec, data_release):
+def get_gost_one_position(ra, dec, data_release, binned = True):
     '''
     this function finds the scan times and angles for a given sky position and data release by searching for the nearest position in a pre-downloaded set of 49152 sky positions (healpix level 64). For this to work, you need to have downloaded healpix_scans.zip and unzipped it into gaiamock/healpix_scans. 
     ra and dec: coordinates of interest in degrees (floats)
     data_release: 'dr3', 'dr4', or 'dr5'
+    binned: if True, return one row per FOV transit (binned over the ~8 CCDs). If False, return one row per CCD, from a coarser set of 3072 sky positions (healpix level 16). This needs individual_ccds.zip (see the README).
     '''
-    num =  hp.ang2pix(64, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
-    tab = Table.read(os.path.join(os.path.dirname(__file__), 'healpix_scans/healpix_64_%d.fits' % num))
+    if binned:
+        num =  hp.ang2pix(64, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
+        tab = Table.read(data_path('healpix_scans', 'healpix_64_%d.fits' % num))
+    else:
+        num =  hp.ang2pix(16, np.radians(90.0 - np.array(dec)), np.radians(np.array(ra)), nest=False)
+        tab = Table.read(data_path('healpix_scans', 'healpix_16_%d.fits' % num))
     jd = fetch_table_element('ObservationTimeAtBarycentre[BarycentricJulianDateInTCB]', tab)
     
     if data_release == 'dr4':
@@ -1381,7 +1405,7 @@ def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_fact
 
 
 
-def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False, ruwe_min = 1.4, skip_acceleration=False):
+def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False, ruwe_min = 1.4, skip_acceleration=False, binned = True):
     '''
     this function generates the mock 1D astrometry for a binary and then fits it with a cascade of astrometric models.  
     ra, dec: coordinates, in degrees
@@ -1401,11 +1425,12 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
     c_funcs: from read_in_C_functions()
     verbose: whether to print results of fitting. 
     if show_residuals, plot the residuals of the best-fit 5-parameter solution and the best-fit orbital solution. This will only happen if an orbital solution is actually calculated (i.e., we get to that stage in the cascade.)
+    binned: if True, simulate and fit one measurement per FOV transit. If False, simulate and fit the measurement from each CCD (see predict_astrometry_luminous_binary()).
     '''
     if c_funcs is None:
         c_funcs = read_in_C_functions()
 
-    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs)
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, binned=binned)
     
     Nret = 23 # number of arguments to return 
     N_visibility_periods = int(np.sum(np.diff(np.sort(t_ast_yr) * 365.25) > 4) + 1)
@@ -1414,21 +1439,21 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
             print('not enough visibility periods!')
         return Nret*[0]
         
-    res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min,skip_acceleration=skip_acceleration ) 
+    res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min,skip_acceleration=skip_acceleration, binned=binned ) 
     
     # potentially blended, so rerun 
     if (period > 1e4) and (res[-2] < 25) & (res[-6]/res[-5] > 5): 
-        t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, do_blending_noise = True)
+        t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, do_blending_noise = True, binned=binned)
         N_visibility_periods = int(np.sum(np.diff(np.sort(t_ast_yr) * 365.25) > 4) + 1)
         if (N_visibility_periods < 12) or (len(ast_obs) < 13): 
             if verbose:
                 print('not enough visibility periods!')
             return Nret*[0]
-        res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration) 
+        res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned) 
 
     return res
     
-def run_only_5par_solution(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs):
+def run_only_5par_solution(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, binned = True):
     '''
     this function generates the mock 1D astrometry for a binary and then fits it with a 5-parameter solution.
     ra, dec: coordinates, in degrees
@@ -1446,13 +1471,14 @@ def run_only_5par_solution(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, e
     f: flux ratio, F2/F1, in the G-band. 
     data_release: 'dr3', 'dr4', or 'dr5'
     c_funcs: from read_in_C_functions()
+    binned: if True, simulate and fit one measurement per FOV transit. If False, simulate and fit the measurement from each CCD (see predict_astrometry_luminous_binary()).
     '''
     if c_funcs is None:
         c_funcs = read_in_C_functions()
 
-    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs)
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = predict_astrometry_luminous_binary(ra = ra, dec = dec, parallax = parallax, pmra = pmra, pmdec = pmdec, m1 = m1, m2 = m2, period = period, Tp = Tp, ecc = ecc, omega = omega, inc = inc_deg*np.pi/180, w=w, phot_g_mean_mag = phot_g_mean_mag, f=f, data_release=data_release, c_funcs=c_funcs, binned=binned)
 
-    res = fit_5par_solution_only(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, binned = True)
+    res = fit_5par_solution_only(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, binned = binned)
     return res
 
 def xyz_to_galactic(x, y, z):
@@ -1543,7 +1569,7 @@ def generate_coordinates_at_a_given_distance_exponential_disk(d_min, d_max, N_st
     ra, dec, d_pc = ra[:N_stars], dec[:N_stars], d_pc[:N_stars]
     return ra, dec, d_pc, x[ok][:N_stars], y[ok][:N_stars], z[ok][:N_stars]
     
-def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True, ruwe_min=1.4, skip_acceleration = False, hz_pc = 300):
+def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True, ruwe_min=1.4, skip_acceleration = False, hz_pc = 300, binned = True):
     '''
     Simulate many sky/orientation realizations of one binary population point.
 
@@ -1558,6 +1584,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
         ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted.
     accepted is True for realizations that reached an orbital solution and
     passed the DR3 cuts.
+    binned: if True, simulate and fit one measurement per FOV transit. If False, simulate and fit the measurement from each CCD (see predict_astrometry_luminous_binary()).
     '''
     ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = hz_pc)
     l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
@@ -1581,7 +1608,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     
     def search_mock_binary_worker(i):
         '''Generate and fit one randomized binary realization for joblib parallel execution.'''
-        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration)        
+        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned)        
         return result
     
     from joblib import Parallel, delayed
@@ -1608,7 +1635,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted
 
 
-def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr4', do_dust = True, ruwe_min=1.4, skip_acceleration = True, hz_pc = 300, a0_over_error_min = 15, parallax_over_error_min = 5):
+def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr4', do_dust = True, ruwe_min=1.4, skip_acceleration = True, hz_pc = 300, a0_over_error_min = 15, parallax_over_error_min = 5, binned = True):
     '''
     Simulate many realizations and apply user-configurable orbital cuts.
 
@@ -1621,6 +1648,7 @@ def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, peri
 
     Returns:
         ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted.
+    binned: if True, simulate and fit one measurement per FOV transit. If False, simulate and fit the measurement from each CCD (see predict_astrometry_luminous_binary()).
     '''
     ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = hz_pc)
     l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
@@ -1644,7 +1672,7 @@ def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, peri
     
     def search_mock_binary_worker(i):
         '''Generate and fit one randomized binary realization for joblib parallel execution.'''
-        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration)        
+        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned)        
         return result
     
     from joblib import Parallel, delayed
@@ -1734,7 +1762,7 @@ def predict_astrometry_and_rvs_simultaneously(t_ast_yr, psi, plx_factor, t_rvs_y
     
     return Lambda_pred, rv_pred
     
-def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean_mag, data_release, c_funcs):
+def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean_mag, data_release, c_funcs, binned = True):
     '''
     this function predicts the epoch-level astrometry for single source. 
     ra and dec (degrees): the coordinates of the source at the reference time (which is different for dr3/dr4/dr5)
@@ -1743,9 +1771,11 @@ def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean
     phot_g_mean_mag: G-band magnitude
     f: flux ratio, F2/F1, in the G-band. 
     c_funcs: from read_in_C_functions()
+    binned: if True, predict one measurement per FOV transit (averaging the ~8 CCDs). If False, predict the measurement from each CCD, with
+        uncertainties rescaled by the observed median ruwe at this sky position (see get_realistic_epoch_astrometry_errors()). Fit the result with binned = False too.
     '''
     
-    t = get_gost_one_position(ra, dec, data_release=data_release)
+    t = get_gost_one_position(ra, dec, data_release=data_release, binned=binned)
     
     # reject a random 10%
     t = t[np.random.uniform(0, 1, len(t)) > 0.1]
@@ -1753,19 +1783,26 @@ def predict_astrometry_single_source(ra, dec, parallax, pmra, pmdec, phot_g_mean
     
     t_ast_yr = rescale_times_astrometry(jd = jds, data_release = data_release)
 
-    N_ccd_avg = 8
-    epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+    if binned:
+        N_ccd_avg = 8
+        epoch_err_per_transit = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)/np.sqrt(N_ccd_avg)
+        epoch_err_per_transit_expect = epoch_err_per_transit
     
-    if phot_g_mean_mag < 13:
-        extra_noise = np.random.uniform(0, 0.04)
-    else: 
-        extra_noise = 0
+        if phot_g_mean_mag < 13:
+            extra_noise = np.random.uniform(0, 0.04)
+        else: 
+            extra_noise = 0
+    else:
+        # the noise is rescaled by sky position, but the returned uncertainties are the expected ones
+        epoch_err_per_transit = get_realistic_epoch_astrometry_errors(ra, dec, phot_g_mean_mag)
+        epoch_err_per_transit_expect = al_uncertainty_per_ccd_interp(G = phot_g_mean_mag)
     
     Lambda_pred = pmra*t_ast_yr*np.sin(psi) + pmdec*t_ast_yr*np.cos(psi) + parallax*plx_factor 
     Lambda_pred += epoch_err_per_transit*np.random.randn(len(psi)) # modeled noise
-    Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
+    if binned:
+        Lambda_pred += extra_noise*np.random.randn(len(psi)) # unmodeled noise
 
-    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit*np.ones(len(Lambda_pred))
+    return t_ast_yr, psi, plx_factor, Lambda_pred, epoch_err_per_transit_expect*np.ones(len(Lambda_pred))
 
  
 def photocenter_orbit_2d_from_thiele_innes(t_ast_yr, parallax, period, ecc, Tp, A, B, F, G,c_funcs):

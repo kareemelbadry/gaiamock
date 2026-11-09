@@ -1,0 +1,10 @@
+# build products
+build/
+dist/
+wheelhouse/
+*.egg-info/
+*.so
+__pycache__/
+.ipynb_checkpoints/
+*.npz
+*.zip
