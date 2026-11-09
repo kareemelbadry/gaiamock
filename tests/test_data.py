@@ -61,6 +61,45 @@ def test_falls_back_to_package_directory(data_dir, tmp_path, monkeypatch):
     assert gaiamock.data_path('healpix_scans', 'healpix_64_7.fits') == tmp_path / 'healpix_scans' / 'healpix_64_7.fits'
 
 
+def make_old_data(root):
+    # healpix_scans/ and the ruwe map at the top of the repository, as the original README said to do
+    (root / 'healpix_scans').mkdir(parents=True)
+    (root / 'healpix_scans' / 'healpix_64_7.fits').touch()
+    (root / 'healpix_16_med_ruwe.npz').touch()
+
+
+def test_finds_old_data_at_checkout_root(data_dir, tmp_path, monkeypatch):
+    # editable install from a checkout that still has its data from before the move to src/
+    root = tmp_path / 'gaiamock'
+    (root / 'src' / 'gaiamock').mkdir(parents=True)
+    (root / 'pyproject.toml').write_text('[project]\nname = "gaiamock"\n')
+    make_old_data(root)
+    monkeypatch.setattr(data, 'PACKAGE_DIR', root / 'src' / 'gaiamock')
+
+    assert data.get_source_checkout_root() == root
+    assert gaiamock.data_path('healpix_scans', 'healpix_64_7.fits') == root / 'healpix_scans' / 'healpix_64_7.fits'
+    assert gaiamock.data_path('healpix_16_med_ruwe.npz') == root / 'healpix_16_med_ruwe.npz'
+
+
+@pytest.mark.parametrize('layout', ['site-packages', 'other src project'])
+def test_does_not_search_outside_checkout(data_dir, tmp_path, monkeypatch, layout):
+    # a regular install, or a src/ directory that belongs to a different project, never looks two levels up
+    if layout == 'site-packages':
+        package_dir = tmp_path / 'lib' / 'python3.12' / 'site-packages' / 'gaiamock'
+        make_old_data(tmp_path / 'lib' / 'python3.12')
+    else:
+        package_dir = tmp_path / 'other' / 'src' / 'gaiamock'
+        (tmp_path / 'other').mkdir()
+        (tmp_path / 'other' / 'pyproject.toml').write_text('[project]\nname = "something-else"\n')
+        make_old_data(tmp_path / 'other')
+    package_dir.mkdir(parents=True)
+    monkeypatch.setattr(data, 'PACKAGE_DIR', package_dir)
+
+    assert data.get_source_checkout_root() is None
+    with pytest.raises(FileNotFoundError):
+        gaiamock.data_path('healpix_scans', 'healpix_64_7.fits')
+
+
 def test_cli_where(data_dir, capsys):
     data.main(['--where'])
     assert capsys.readouterr().out.strip() == str(data_dir)
