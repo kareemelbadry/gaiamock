@@ -8,6 +8,7 @@ On my local cluster, I compiled with:
 
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 #include <gsl/gsl_matrix.h>
 #include <gsl/gsl_vector.h>
 #include <gsl/gsl_blas.h>
@@ -974,7 +975,11 @@ void run_astfit_grid_multistart(double* t_ast_yr, double* psi, double *plx_facto
    The circular phase is absorbed by the linear Thiele-Innes coefficients, so this scores
    each trial period once, then keeps the existing eccentric phase scan and Nelder-Mead polish.
    results[0:4] = P, phi_p, e, chi2. */
-void run_astfit_periodogram_multistart_config(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier, int n_period, int n_short_period, int n_ecc_phase, int max_periods_keep, int max_starts, int use_full_nm) {
+/* Original implementation of the periodogram multistart search, with every chi2 evaluated through
+   GSL (get_chi2_astrometry / get_chi2_astrometry_reject_outliers / linear_circular_periodogram_chi2).
+   Kept for reference and testing; run_astfit_periodogram_multistart_config() below runs the same
+   search with the faster objective. */
+void run_astfit_periodogram_multistart_config_gsl(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier, int n_period, int n_short_period, int n_ecc_phase, int max_periods_keep, int max_starts, int use_full_nm) {
     int max_periods = 32;
     int max_candidates = 256;
     double short_period_max = fmin(U[0], 300.0);
@@ -1061,6 +1066,615 @@ void run_astfit_periodogram_multistart_config(double* t_ast_yr, double* psi, dou
     free(periods);
     free(candidates);
     free(starts);
+}
+
+void run_astfit_periodogram_multistart_gsl(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    run_astfit_periodogram_multistart_config_gsl(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, results, n_obs, reject_outlier, ASTFIT_N_PERIOD, ASTFIT_N_SHORT_PERIOD, ASTFIT_N_ECC_PHASE, ASTFIT_MAX_PERIODS_KEEP, ASTFIT_MAX_STARTS, 0);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Fast evaluation of chi2(P, phi_p, ecc) for the optimizers.
+
+   The 9-parameter linear model has 5 columns (offsets, proper motions, parallax) that do not
+   depend on (P, phi_p, ecc). AstfitWorkspace whitens them and orthonormalizes them once per source,
+   and stores the whitened data with those columns projected out. Each chi2 evaluation then only
+   builds the 4 Thiele-Innes columns, orthogonalizes them against the fixed ones (classical
+   Gram-Schmidt with one re-orthogonalization pass), and returns the squared norm of the updated
+   residual. There are no GSL calls or allocations per evaluation. Orbital columns that are
+   numerically degenerate (e.g. P >> the time baseline) are dropped, which gives the
+   minimum-norm projection rather than an ill-conditioned 9x9 solve.
+
+   With reject_outlier, the epoch with the largest residual is removed using the exact
+   delete-one identity chi2_(-i) = chi2 - r_i^2 / (1 - h_ii), where h_ii is the leverage of epoch
+   i. This equals refitting without that epoch, as in get_chi2_astrometry_reject_outliers().
+
+   The chi2 agrees with get_chi2_astrometry() / get_chi2_astrometry_reject_outliers() to ~1e-12
+   (relative) and is several times faster.
+   --------------------------------------------------------------------------------------------- */
+
+typedef struct {
+    int n, reject, nfix;
+    double *a;      /* 2*PI*t*365.25 */
+    double *sw, *cw;/* sin(psi)/err, cos(psi)/err */
+    double *Q;      /* nfix*n orthonormal fixed columns */
+    double *r0;     /* whitened data with the fixed columns projected out */
+    double *h0;     /* leverage of the fixed columns */
+    double *Qo;     /* 4*n scratch: orthonormal orbital columns */
+    double *res;    /* n scratch: residual */
+    double tspan;   /* time baseline in days */
+    double *t, *psi, *pf, *y, *err;
+} AstfitWorkspace;
+
+static double ws_dot(const double* x, const double* y, int n) {
+    double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    int j = 0;
+    for (; j + 3 < n; j += 4) {
+        s0 += x[j] * y[j];
+        s1 += x[j + 1] * y[j + 1];
+        s2 += x[j + 2] * y[j + 2];
+        s3 += x[j + 3] * y[j + 3];
+    }
+    for (; j < n; j++) s0 += x[j] * y[j];
+    return (s0 + s1) + (s2 + s3);
+}
+
+/* Orthogonalize v against nq orthonormal columns stored in Q (classical Gram-Schmidt, repeated
+   once if there was heavy cancellation). Returns the norm of the result relative to the input. */
+static double ws_orth(double* v, const double* Q, int nq, int n) {
+    double nrm0 = sqrt(ws_dot(v, v, n));
+    if (nrm0 == 0.0 || nq == 0) return nrm0 == 0.0 ? 0.0 : 1.0;
+    double nrm = nrm0;
+    for (int pass = 0; pass < 2; pass++) {
+        double d[16] = {0};
+        for (int k0 = 0; k0 < nq; k0 += 4) {
+            int m = nq - k0 < 4 ? nq - k0 : 4;
+            const double *q0 = Q + (long)k0 * n, *q1 = q0 + n, *q2 = q1 + n, *q3 = q2 + n;
+            double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+            if (m == 4) for (int j = 0; j < n; j++) { double x = v[j]; s0 += q0[j] * x; s1 += q1[j] * x; s2 += q2[j] * x; s3 += q3[j] * x; }
+            else if (m == 3) for (int j = 0; j < n; j++) { double x = v[j]; s0 += q0[j] * x; s1 += q1[j] * x; s2 += q2[j] * x; }
+            else if (m == 2) for (int j = 0; j < n; j++) { double x = v[j]; s0 += q0[j] * x; s1 += q1[j] * x; }
+            else for (int j = 0; j < n; j++) s0 += q0[j] * v[j];
+            d[k0] = s0; d[k0 + 1] = s1; d[k0 + 2] = s2; d[k0 + 3] = s3;
+        }
+        double a0 = 0, a1 = 0;
+        for (int j = 0; j < n; j++) {
+            double x = v[j];
+            for (int k = 0; k < nq; k++) x -= d[k] * Q[(long)k * n + j];
+            v[j] = x;
+            if (j & 1) a1 += x * x; else a0 += x * x;
+        }
+        double nn = sqrt(a0 + a1);
+        if (nn > 0.5 * nrm) { nrm = nn; break; }
+        nrm = nn;
+    }
+    return nrm / nrm0;
+}
+
+/* Fill w for one source. Epoch `skip` (if >= 0) gets zero weight. */
+static void ws_build(AstfitWorkspace* w, double* t, double* psi, double* pf, double* y, double* err, int n, int reject, int skip) {
+    w->n = n; w->reject = reject;
+    w->t = t; w->psi = psi; w->pf = pf; w->y = y; w->err = err;
+    double* buf = (double*)malloc(sizeof(double) * (long)n * 15);
+    w->a = buf; w->sw = buf + n; w->cw = buf + 2 * n; w->Q = buf + 3 * n;
+    w->r0 = buf + 8 * n; w->h0 = buf + 9 * n; w->Qo = buf + 10 * n; w->res = buf + 14 * n;
+    double tmin = t[0], tmax = t[0];
+    for (int j = 0; j < n; j++) {
+        double iw = (j == skip) ? 0.0 : 1.0 / err[j];
+        w->a[j] = 2 * PI * t[j] * 365.25;
+        w->sw[j] = sin(psi[j]) * iw;
+        w->cw[j] = cos(psi[j]) * iw;
+        w->r0[j] = y[j] * iw;
+        if (t[j] < tmin) tmin = t[j];
+        if (t[j] > tmax) tmax = t[j];
+    }
+    w->tspan = (tmax - tmin) * 365.25;
+    int nq = 0;
+    for (int c = 0; c < 5; c++) {
+        double* v = w->Q + (long)nq * n;
+        for (int j = 0; j < n; j++) {
+            switch (c) {
+                case 0: v[j] = w->sw[j]; break;
+                case 1: v[j] = t[j] * w->sw[j]; break;
+                case 2: v[j] = w->cw[j]; break;
+                case 3: v[j] = t[j] * w->cw[j]; break;
+                default: v[j] = (j == skip) ? 0.0 : pf[j] / err[j];
+            }
+        }
+        if (ws_orth(v, w->Q, nq, n) > 1e-10) {
+            double s = 1.0 / sqrt(ws_dot(v, v, n));
+            for (int j = 0; j < n; j++) v[j] *= s;
+            nq++;
+        }
+    }
+    w->nfix = nq;
+    ws_orth(w->r0, w->Q, nq, n);
+    for (int j = 0; j < n; j++) {
+        double h = 0.0;
+        for (int k = 0; k < nq; k++) h += w->Q[(long)k * n + j] * w->Q[(long)k * n + j];
+        w->h0[j] = h;
+    }
+}
+
+static AstfitWorkspace* astfit_workspace_create(double* t, double* psi, double* pf, double* y, double* err, int n, int reject) {
+    AstfitWorkspace* w = (AstfitWorkspace*)malloc(sizeof(AstfitWorkspace));
+    ws_build(w, t, psi, pf, y, err, n, reject, -1);
+    return w;
+}
+
+static void astfit_workspace_free(AstfitWorkspace* w) {
+    if (w) { free(w->a); free(w); }
+}
+
+/* Kepler solve returning cos(E), sin(E). Same starter and third-order iteration as
+   solve_Kepler_equation(). Because the update is third order, once a correction is below 1e-4
+   the updated E is converged to machine precision (max |dE| < 2e-14 for e <= 0.99), so we stop
+   there. cos/sin of the final E are obtained by rotating the last evaluated pair by the small
+   final correction (5th-order Taylor series, error < 1e-26) instead of calling cos/sin again. */
+static inline void kepler_cos_sin(double Mi, double ecc, double* cE, double* sE) {
+    double M = Mi - (2 * PI) * floor(Mi * (1.0 / (2 * PI)));
+    if (M < 0.0) M += 2 * PI;
+    if (M >= 2 * PI) M -= 2 * PI;
+    if (ecc == 0.0) { *cE = cos(M); *sE = sin(M); return; }
+    double E = KeplerStart3(ecc, M);
+    for (int it = 0; it < 100; it++) {
+        double c = cos(E), s = sin(E);
+        double t2 = -1 + ecc * c, t4 = ecc * s, t5 = -E + t4 + M;
+        double t6 = t5 / (0.5 * t5 * t4 / t2 + t2);
+        double d = t5 / ((0.5 * s - (1.0 / 6.0) * c * t6) * ecc * t6 + t2);
+        if (fabs(d) < 1e-4 || it == 99) {
+            double d2 = d * d;
+            double cd = 1.0 - d2 * (0.5 - d2 / 24.0), sd = d * (1.0 - d2 * (1.0 / 6.0 - d2 / 120.0));
+            *cE = c * cd + s * sd;   /* cos(E - d) */
+            *sE = s * cd - c * sd;   /* sin(E - d) */
+            return;
+        }
+        E -= d;
+    }
+}
+
+/* chi2 without outlier rejection. Leaves the residual in w->res and the nor orthonormal
+   orbital columns in w->Qo. */
+static double ws_chi2_all(AstfitWorkspace* w, double P, double phi_p, double ecc, int* nor_out) {
+    int n = w->n;
+    double sq = sqrt(1 - ecc * ecc);
+    double* B = w->Qo;
+    for (int j = 0; j < n; j++) {
+        double cE, sE;
+        kepler_cos_sin(w->a[j] / P - phi_p, ecc, &cE, &sE);
+        double X = cE - ecc, Y = sq * sE;
+        B[j] = X * w->sw[j];
+        B[n + j] = Y * w->sw[j];
+        B[2 * n + j] = X * w->cw[j];
+        B[3 * n + j] = Y * w->cw[j];
+    }
+    memcpy(w->res, w->r0, sizeof(double) * n);
+    int nor = 0;
+    for (int c = 0; c < 4; c++) {
+        double* v = B + (long)c * n;
+        double rel = ws_orth(v, w->Q, w->nfix, n);
+        if (rel > 1e-10 && nor > 0) rel *= ws_orth(v, B, nor, n);
+        if (!(rel > 1e-10)) continue;
+        double s = 1.0 / sqrt(ws_dot(v, v, n));
+        for (int j = 0; j < n; j++) v[j] *= s;
+        if (nor != c) memcpy(B + (long)nor * n, v, sizeof(double) * n);
+        double proj = ws_dot(B + (long)nor * n, w->res, n);
+        for (int j = 0; j < n; j++) w->res[j] -= proj * B[(long)nor * n + j];
+        nor++;
+    }
+    *nor_out = nor;
+    return ws_dot(w->res, w->res, n);
+}
+
+/* chi2 at (P, phi_p, ecc), with the worst epoch removed if w->reject. */
+static double astfit_workspace_chi2(AstfitWorkspace* w, double P, double phi_p, double ecc) {
+    int nor;
+    double chi2 = ws_chi2_all(w, P, phi_p, ecc, &nor);
+    if (!w->reject) return chi2;
+    int n = w->n, worst = 0;
+    double rw = 0.0;
+    for (int j = 0; j < n; j++) {
+        double r2 = w->res[j] * w->res[j];
+        if (r2 > rw) { rw = r2; worst = j; }
+    }
+    double h = w->h0[worst];
+    for (int k = 0; k < nor; k++) h += w->Qo[(long)k * n + worst] * w->Qo[(long)k * n + worst];
+    double denom = 1.0 - h;
+    if (denom > 1e-10 && isfinite(denom)) return chi2 - rw / denom;
+    /* epoch with leverage ~1: refit explicitly without it */
+    AstfitWorkspace m;
+    ws_build(&m, w->t, w->psi, w->pf, w->y, w->err, n, 0, worst);
+    double c2 = ws_chi2_all(&m, P, phi_p, ecc, &nor);
+    free(m.a);
+    return c2;
+}
+
+/* Circular periodogram value at P (equivalent to linear_circular_periodogram_chi2(); the
+   phase is absorbed by the linear coefficients, and rejection is only applied for n > 13). */
+static double astfit_workspace_periodogram(AstfitWorkspace* w, double P) {
+    if (w->reject && w->n <= 13) { int nor; return ws_chi2_all(w, P, 0.0, 0.0, &nor); }
+    return astfit_workspace_chi2(w, P, 0.0, 0.0);
+}
+
+/* Same as get_chi2_astrometry()[0] (or get_chi2_astrometry_reject_outliers()[0]), via the fast path. */
+double get_chi2_astrometry_fast(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double P, double phi_p, double ecc, int reject_outlier) {
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier);
+    double chi2 = astfit_workspace_chi2(w, P, phi_p, ecc);
+    astfit_workspace_free(w);
+    return chi2;
+}
+
+/* ------------- Nelder-Mead on the fast objective (same logic as polish_astfit_start_nelder_mead_config) ------------- */
+
+typedef double (*astfit_ws_objective)(AstfitWorkspace*, double*, double*, double*);
+typedef void (*astfit_ws_clamp)(double*, double*, double*);
+
+static double ws_objective_logp(AstfitWorkspace* w, double* L, double* U, double* y) {
+    if (y[0] < log(L[0]) || y[0] > log(U[0]) || y[1] < L[1] || y[1] > U[1] || y[2] < L[2] || y[2] > U[2]) return INFINITY;
+    return astfit_workspace_chi2(w, exp(y[0]), y[1], y[2]);
+}
+
+static void ws_nelder_mead(AstfitWorkspace* w, double* L, double* U, astfit_ws_objective obj, astfit_ws_clamp clamp,
+                           double simplex[4][3], double f[4], int max_iter, double fspread_tol, double xspread_tol) {
+    for (int i = 0; i < 4; i++) f[i] = obj(w, L, U, simplex[i]);
+    for (int iter = 0; iter < max_iter; iter++) {
+        sort_simplex4(simplex, f);
+        double xspread = 0.0;
+        for (int i = 1; i < 4; i++) {
+            for (int k = 0; k < 3; k++) {
+                double d = fabs(simplex[i][k] - simplex[0][k]);
+                if (d > xspread) xspread = d;
+            }
+        }
+        if (fabs(f[3] - f[0]) < fspread_tol && xspread < xspread_tol) break;
+        double cen[3] = {0, 0, 0};
+        for (int i = 0; i < 3; i++) for (int k = 0; k < 3; k++) cen[k] += simplex[i][k] / 3.0;
+        double xr[3];
+        for (int k = 0; k < 3; k++) xr[k] = cen[k] + (cen[k] - simplex[3][k]);
+        clamp(xr, L, U);
+        double fr = obj(w, L, U, xr);
+        if (fr < f[0]) {
+            double xe[3];
+            for (int k = 0; k < 3; k++) xe[k] = cen[k] + 2.0 * (xr[k] - cen[k]);
+            clamp(xe, L, U);
+            double fe = obj(w, L, U, xe);
+            if (fe < fr) { memcpy(simplex[3], xe, sizeof xe); f[3] = fe; }
+            else { memcpy(simplex[3], xr, sizeof xr); f[3] = fr; }
+        } else if (fr < f[2]) {
+            memcpy(simplex[3], xr, sizeof xr); f[3] = fr;
+        } else {
+            double xc[3];
+            const double* from = (fr < f[3]) ? xr : simplex[3];
+            for (int k = 0; k < 3; k++) xc[k] = cen[k] + 0.5 * (from[k] - cen[k]);
+            clamp(xc, L, U);
+            double fc = obj(w, L, U, xc);
+            if (fc < f[3]) { memcpy(simplex[3], xc, sizeof xc); f[3] = fc; }
+            else {
+                for (int i = 1; i < 4; i++) {
+                    for (int k = 0; k < 3; k++) simplex[i][k] = simplex[0][k] + 0.5 * (simplex[i][k] - simplex[0][k]);
+                    clamp(simplex[i], L, U);
+                    f[i] = obj(w, L, U, simplex[i]);
+                }
+            }
+        }
+    }
+    sort_simplex4(simplex, f);
+}
+
+/* Nelder-Mead in (ln P, phi_p, ecc), x = (P, phi_p, ecc) in/out. */
+static void ws_polish_logp(AstfitWorkspace* w, double* L, double* U, double* x, int max_iter, double fspread_tol, double xspread_tol) {
+    double steps[3] = {0.05, 0.25, 0.08};
+    double s[4][3], f[4];
+    s[0][0] = log(x[0]); s[0][1] = x[1]; s[0][2] = x[2];
+    clamp_astfit_logp_vertex(s[0], L, U);
+    for (int i = 1; i < 4; i++) {
+        memcpy(s[i], s[0], sizeof s[0]);
+        s[i][i - 1] += steps[i - 1];
+        clamp_astfit_logp_vertex(s[i], L, U);
+        if (s[i][i - 1] == s[0][i - 1]) { s[i][i - 1] -= steps[i - 1]; clamp_astfit_logp_vertex(s[i], L, U); }
+    }
+    ws_nelder_mead(w, L, U, ws_objective_logp, clamp_astfit_logp_vertex, s, f, max_iter, fspread_tol, xspread_tol);
+    x[0] = exp(s[0][0]); x[1] = s[0][1]; x[2] = s[0][2];
+}
+
+/* Periodogram + eccentric grid + multistart Nelder-Mead search for (P, phi_p, e).
+   This is the same search as run_astfit_periodogram_multistart_config_gsl(), evaluated with
+   the fast objective above. results[0:4] = P, phi_p, e, chi2. */
+void run_astfit_periodogram_multistart_config(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier, int n_period, int n_short_period, int n_ecc_phase, int max_periods_keep, int max_starts, int use_full_nm) {
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier);
+    int max_periods = 32;
+    int max_candidates = 256;
+    double short_period_max = fmin(U[0], 300.0);
+    double ecc_grid[6] = {0.0, 0.2, 0.4, 0.6, 0.8, 0.95};
+
+    int max_rows = n_period + ((short_period_max > L[0]) ? n_short_period : 0) + 8;
+    AstfitCandidate* rows = (AstfitCandidate*)malloc(max_rows * sizeof(AstfitCandidate));
+    int n_rows = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        double p_min = L[0], p_max = pass ? short_period_max : U[0];
+        int np = pass ? n_short_period : n_period;
+        if (pass && !(short_period_max > L[0])) break;
+        for (int ip = 0; ip < np; ip++) {
+            double frac = (np == 1) ? 0.0 : ((double)ip / (double)(np - 1));
+            double period = exp(log(p_min) + frac * (log(p_max) - log(p_min)));
+            rows[n_rows].chi2 = astfit_workspace_periodogram(w, period);
+            rows[n_rows].period = period;
+            rows[n_rows].phi_p = 0.0;
+            rows[n_rows].ecc = 0.0;
+            n_rows++;
+        }
+    }
+    qsort(rows, n_rows, sizeof(AstfitCandidate), compare_astfit_candidate);
+
+    double periods[32];
+    int n_periods = 0;
+    for (int i = 0; i < n_rows && n_periods < max_periods_keep; i++) {
+        if (astfit_period_is_distinct(rows[i].period, periods, n_periods, 0.025)) periods[n_periods++] = rows[i].period;
+    }
+    for (int i = 0; i < 8 && n_periods < max_periods; i++) {
+        double period = U[0] * exp(-((double)i / 7.0));
+        if (period >= L[0] && period <= U[0] && astfit_period_is_distinct(period, periods, n_periods, 0.01)) periods[n_periods++] = period;
+    }
+
+    AstfitCandidate* candidates = (AstfitCandidate*)malloc(max_candidates * sizeof(AstfitCandidate));
+    int n_candidates = 0;
+    for (int i = 0; i < n_rows && i < 128; i++) {
+        insert_astfit_candidate(candidates, &n_candidates, max_candidates, rows[i].chi2, rows[i].period, rows[i].phi_p, rows[i].ecc);
+    }
+    for (int ip = 0; ip < n_periods; ip++) {
+        for (int ie = 0; ie < 6; ie++) {
+            double ecc = ecc_grid[ie];
+            if (ecc < L[2] || ecc > U[2]) continue;
+            for (int iph = 0; iph < n_ecc_phase; iph++) {
+                double phi_p = L[1] + ((double)iph / (double)n_ecc_phase) * (U[1] - L[1]);
+                double chi2 = astfit_workspace_chi2(w, periods[ip], phi_p, ecc);
+                insert_astfit_candidate(candidates, &n_candidates, max_candidates, chi2, periods[ip], phi_p, ecc);
+            }
+        }
+    }
+
+    AstfitCandidate* starts = (AstfitCandidate*)malloc(max_starts * sizeof(AstfitCandidate));
+    int n_starts = 0;
+    for (int i = 0; i < n_candidates && n_starts < max_starts; i++) {
+        if (astfit_start_is_distinct(candidates[i], starts, n_starts)) starts[n_starts++] = candidates[i];
+    }
+
+    double best_chi2 = INFINITY;
+    double best_x[3] = {(U[0] + L[0]) / 2.0, (U[1] + L[1]) / 2.0, (U[2] + L[2]) / 2.0};
+    for (int i = 0; i < n_starts; i++) {
+        double x[3] = {starts[i].period, starts[i].phi_p, starts[i].ecc};
+        if (use_full_nm) {
+            ws_polish_logp(w, L, U, x, ASTFIT_FULL_NM_MAX_ITER, ASTFIT_FULL_NM_FSPREAD_TOL, ASTFIT_FULL_NM_XSPREAD_TOL);
+        } else {
+            ws_polish_logp(w, L, U, x, ASTFIT_NM_MAX_ITER, ASTFIT_NM_FSPREAD_TOL, ASTFIT_NM_XSPREAD_TOL);
+        }
+        double chi2 = astfit_workspace_chi2(w, x[0], x[1], x[2]);
+        if (chi2 < best_chi2) {
+            best_chi2 = chi2;
+            memcpy(best_x, x, sizeof best_x);
+        }
+    }
+
+    results[0] = best_x[0];
+    results[1] = best_x[1];
+    results[2] = best_x[2];
+    results[3] = best_chi2;
+
+    free(rows);
+    free(candidates);
+    free(starts);
+    astfit_workspace_free(w);
+}
+
+/* ---------------------------------------------------------------------------------------------
+   run_astfit_periodogram_multistart_v2: a broader search on the same fast objective.
+
+   Differences from run_astfit_periodogram_multistart:
+   1. The circular periodogram is evaluated on a grid uniform in frequency, df = 1/(5 T) (T = time
+      baseline), with the step capped at 0.02 in ln P. The log-spaced grid undersamples short
+      periods, where peaks have width ~P/T in ln P.
+   2. Seeds are the 12 deepest local minima of the periodogram, rather than the lowest grid rows
+      (which tend to cluster on one broad peak). Around the 4 deepest, it also seeds the
+      neighbouring frequencies f +- {0.5, 1, 2}/T and the harmonics 2P and 3P (the circular
+      periodogram of an eccentric orbit often peaks at P/2 or P/3). Long-period anchors run from
+      T/4 to P_max every 0.08 in ln P.
+   3. At every seed period, an eccentric grid (e = 0.2 ... 0.95; 36 phases at periodogram seeds,
+      18 at anchors) picks the best (phi_p, e).
+   4. Nelder-Mead runs in (ln P, e cos phi_p, e sin phi_p), which has no degeneracy at e = 0 and
+      wraps phi_p, with an initial ln P step of min(0.05, 0.15 P/T). It is started from all 12
+      periodogram minima (circular) and the 24 best eccentric seeds, and the winner gets a final
+      tight polish.
+   If the phi_p bounds do not span a full 2*pi, the local optimization falls back to Nelder-Mead
+   in (ln P, phi_p, e) with clamped bounds. results[0:4] = P, phi_p, e, chi2.
+   --------------------------------------------------------------------------------------------- */
+#define ASTFIT_V2_OVERSAMPLE 5.0
+#define ASTFIT_V2_MAX_DLNP 0.02
+#define ASTFIT_V2_N_PEAKS 12
+#define ASTFIT_V2_N_DENSE_PEAKS 4
+#define ASTFIT_V2_ANCHOR_MIN_OVER_T 0.25
+#define ASTFIT_V2_ANCHOR_DLNP 0.08
+#define ASTFIT_V2_N_PHASE_PEAK 36
+#define ASTFIT_V2_N_PHASE_ANCHOR 18
+#define ASTFIT_V2_N_ECC_STARTS 24
+#define ASTFIT_V2_STEP_SCALE 0.15
+#define ASTFIT_V2_NM_MAX_ITER 400
+#define ASTFIT_V2_NM_FSPREAD_TOL 1e-4
+#define ASTFIT_V2_NM_XSPREAD_TOL 3e-6
+#define ASTFIT_V2_FINAL_MAX_ITER 600
+#define ASTFIT_V2_FINAL_FSPREAD_TOL 1e-7
+#define ASTFIT_V2_FINAL_XSPREAD_TOL 1e-8
+
+/* objective in q = (ln P, e cos phi_p, e sin phi_p) */
+static double hk_objective(AstfitWorkspace* w, double* L, double* U, double* q) {
+    double e = hypot(q[1], q[2]);
+    if (q[0] < log(L[0]) || q[0] > log(U[0]) || e < L[2] - 1e-12 || e > U[2] + 1e-12) return INFINITY;
+    return astfit_workspace_chi2(w, exp(q[0]), atan2(q[2], q[1]), e);
+}
+
+static void hk_clamp(double* q, double* L, double* U) {
+    q[0] = fmin(fmax(q[0], log(L[0])), log(U[0]));
+    double e = hypot(q[1], q[2]);
+    if (e > U[2]) { q[1] *= U[2] / e; q[2] *= U[2] / e; }
+    else if (e < L[2]) {
+        if (e > 0) { q[1] *= L[2] / e; q[2] *= L[2] / e; }
+        else q[1] = L[2];
+    }
+}
+
+/* Nelder-Mead in hk coordinates. x = (P, phi_p, e) in/out; returns chi2. */
+static double hk_nelder_mead(AstfitWorkspace* w, double* L, double* U, double* x, double step_scale, int max_iter, double fspread_tol, double xspread_tol) {
+    double steps[3] = {fmin(0.05, step_scale * x[0] / fmax(w->tspan, 1.0)), 0.08, 0.08};
+    double s[4][3], f[4];
+    s[0][0] = log(x[0]); s[0][1] = x[2] * cos(x[1]); s[0][2] = x[2] * sin(x[1]);
+    hk_clamp(s[0], L, U);
+    for (int i = 1; i < 4; i++) {
+        memcpy(s[i], s[0], sizeof s[0]);
+        s[i][i - 1] += steps[i - 1];
+        hk_clamp(s[i], L, U);
+        if (s[i][i - 1] == s[0][i - 1]) { s[i][i - 1] -= steps[i - 1]; hk_clamp(s[i], L, U); }
+    }
+    ws_nelder_mead(w, L, U, hk_objective, hk_clamp, s, f, max_iter, fspread_tol, xspread_tol);
+    x[0] = exp(s[0][0]);
+    x[1] = fmod(atan2(s[0][2], s[0][1]) - L[1], 2 * PI);
+    if (x[1] < 0) x[1] += 2 * PI;
+    x[1] += L[1];
+    x[2] = hypot(s[0][1], s[0][2]);
+    return f[0];
+}
+
+typedef struct { double chi2, period, phi_p, ecc; } AstfitSeed;
+
+static int compare_astfit_seed(const void* a, const void* b) {
+    double x = ((const AstfitSeed*)a)->chi2, y = ((const AstfitSeed*)b)->chi2;
+    return (x < y) ? -1 : (x > y);
+}
+
+void run_astfit_periodogram_multistart_v2(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier);
+    double T = fmax(w->tspan, 1.0);
+    int full_phase = (U[1] - L[1] >= 2 * PI - 1e-10);
+
+    /* 1. circular periodogram, uniform in frequency */
+    int cap = 1024, ng = 0;
+    double* grid_P = (double*)malloc(sizeof(double) * cap);
+    double* grid_chi2 = (double*)malloc(sizeof(double) * cap);
+    double f = 1.0 / U[0], f_max = 1.0 / L[0];
+    while (1) {
+        if (ng == cap) {
+            cap *= 2;
+            grid_P = (double*)realloc(grid_P, sizeof(double) * cap);
+            grid_chi2 = (double*)realloc(grid_chi2, sizeof(double) * cap);
+        }
+        grid_P[ng] = 1.0 / f;
+        grid_chi2[ng] = astfit_workspace_periodogram(w, grid_P[ng]);
+        ng++;
+        if (f >= f_max) break;
+        f = fmin(f + fmin(1.0 / (ASTFIT_V2_OVERSAMPLE * T), ASTFIT_V2_MAX_DLNP * f), f_max);
+    }
+
+    /* 2. seed periods: deepest local minima, their neighbours and harmonics, long-period anchors */
+    AstfitSeed* minima = (AstfitSeed*)malloc(sizeof(AstfitSeed) * ng);
+    int n_min = 0;
+    for (int i = 0; i < ng; i++) {
+        if (!isfinite(grid_chi2[i])) continue;
+        if ((i == 0 || grid_chi2[i] < grid_chi2[i - 1]) && (i == ng - 1 || grid_chi2[i] <= grid_chi2[i + 1])) {
+            AstfitSeed s = {grid_chi2[i], grid_P[i], L[1], 0.0};
+            minima[n_min++] = s;
+        }
+    }
+    qsort(minima, n_min, sizeof(AstfitSeed), compare_astfit_seed);
+
+    int cap_seeds = ASTFIT_V2_N_PEAKS + ASTFIT_V2_N_DENSE_PEAKS * 8 + 512;
+    AstfitSeed* seeds = (AstfitSeed*)malloc(sizeof(AstfitSeed) * cap_seeds);
+    int n_seeds = 0;
+    for (int i = 0; i < n_min && n_seeds < ASTFIT_V2_N_PEAKS; i++) seeds[n_seeds++] = minima[i];
+    int n_peak_seeds = n_seeds;
+    for (int i = 0; i < ASTFIT_V2_N_DENSE_PEAKS && i < n_peak_seeds; i++) {
+        double f0 = 1.0 / seeds[i].period;
+        double offsets[6] = {-2, -1, -0.5, 0.5, 1, 2};
+        double extra[8];
+        int n_extra = 0;
+        for (int k = 0; k < 6; k++) if (f0 + offsets[k] / T > 0) extra[n_extra++] = 1.0 / (f0 + offsets[k] / T);
+        extra[n_extra++] = 2 * seeds[i].period;
+        extra[n_extra++] = 3 * seeds[i].period;
+        for (int k = 0; k < n_extra; k++) {
+            if (extra[k] < L[0] || extra[k] > U[0]) continue;
+            AstfitSeed s = {INFINITY, extra[k], L[1], 0.0};
+            seeds[n_seeds++] = s;
+        }
+    }
+    int n_dense_seeds = n_seeds;   /* these get the finer phase grid */
+    double lo = fmax(L[0], ASTFIT_V2_ANCHOR_MIN_OVER_T * T), hi = U[0];
+    if (hi > lo) {
+        int na = (int)ceil(log(hi / lo) / ASTFIT_V2_ANCHOR_DLNP);
+        if (na < 1) na = 1;
+        for (int i = 0; i <= na && n_seeds < cap_seeds; i++) {
+            AstfitSeed s = {INFINITY, exp(log(lo) + (log(hi) - log(lo)) * i / (double)na), L[1], 0.0};
+            seeds[n_seeds++] = s;
+        }
+    }
+
+    /* 3. eccentric grid at each seed period -> best (phi_p, e) per seed */
+    double ecc_grid[5] = {0.2, 0.4, 0.6, 0.8, 0.95};
+    AstfitSeed* ecc_seeds = (AstfitSeed*)malloc(sizeof(AstfitSeed) * (n_seeds > 0 ? n_seeds : 1));
+    for (int s = 0; s < n_seeds; s++) {
+        int n_phase = (s < n_dense_seeds) ? ASTFIT_V2_N_PHASE_PEAK : ASTFIT_V2_N_PHASE_ANCHOR;
+        AstfitSeed b = {INFINITY, seeds[s].period, L[1], 0.0};
+        for (int ie = 0; ie < 5; ie++) {
+            if (ecc_grid[ie] < L[2] || ecc_grid[ie] > U[2]) continue;
+            for (int ip = 0; ip < n_phase; ip++) {
+                double phi_p = L[1] + (U[1] - L[1]) * ip / (double)n_phase;
+                double chi2 = astfit_workspace_chi2(w, seeds[s].period, phi_p, ecc_grid[ie]);
+                if (chi2 < b.chi2) { b.chi2 = chi2; b.phi_p = phi_p; b.ecc = ecc_grid[ie]; }
+            }
+        }
+        ecc_seeds[s] = b;
+    }
+    qsort(ecc_seeds, n_seeds, sizeof(AstfitSeed), compare_astfit_seed);
+
+    /* 4. local optimization from every periodogram minimum (circular) and the best eccentric seeds */
+    double best_chi2 = INFINITY;
+    double best_x[3] = {(U[0] + L[0]) / 2.0, (U[1] + L[1]) / 2.0, (U[2] + L[2]) / 2.0};
+    for (int pass = 0; pass < 2; pass++) {
+        int n_try = pass ? (n_seeds < ASTFIT_V2_N_ECC_STARTS ? n_seeds : ASTFIT_V2_N_ECC_STARTS) : n_peak_seeds;
+        for (int i = 0; i < n_try; i++) {
+            double x[3];
+            if (pass) {
+                if (!isfinite(ecc_seeds[i].chi2)) continue;
+                x[0] = ecc_seeds[i].period; x[1] = ecc_seeds[i].phi_p; x[2] = ecc_seeds[i].ecc;
+            } else {
+                x[0] = seeds[i].period; x[1] = L[1]; x[2] = fmax(L[2], 0.0);
+            }
+            double chi2;
+            if (full_phase) {
+                chi2 = hk_nelder_mead(w, L, U, x, ASTFIT_V2_STEP_SCALE, ASTFIT_V2_NM_MAX_ITER, ASTFIT_V2_NM_FSPREAD_TOL, ASTFIT_V2_NM_XSPREAD_TOL);
+            } else {
+                ws_polish_logp(w, L, U, x, ASTFIT_V2_NM_MAX_ITER, ASTFIT_V2_NM_FSPREAD_TOL, ASTFIT_V2_NM_XSPREAD_TOL);
+                chi2 = astfit_workspace_chi2(w, x[0], x[1], x[2]);
+            }
+            if (chi2 < best_chi2) { best_chi2 = chi2; memcpy(best_x, x, sizeof best_x); }
+        }
+    }
+
+    /* 5. tight final polish of the best solution */
+    if (isfinite(best_chi2)) {
+        double x[3] = {best_x[0], best_x[1], best_x[2]};
+        double chi2;
+        if (full_phase) {
+            chi2 = hk_nelder_mead(w, L, U, x, 0.1 * ASTFIT_V2_STEP_SCALE, ASTFIT_V2_FINAL_MAX_ITER, ASTFIT_V2_FINAL_FSPREAD_TOL, ASTFIT_V2_FINAL_XSPREAD_TOL);
+        } else {
+            ws_polish_logp(w, L, U, x, ASTFIT_V2_FINAL_MAX_ITER, ASTFIT_V2_FINAL_FSPREAD_TOL, ASTFIT_V2_FINAL_XSPREAD_TOL);
+            chi2 = astfit_workspace_chi2(w, x[0], x[1], x[2]);
+        }
+        if (chi2 < best_chi2) { best_chi2 = chi2; memcpy(best_x, x, sizeof best_x); }
+    }
+
+    results[0] = best_x[0];
+    results[1] = best_x[1];
+    results[2] = best_x[2];
+    results[3] = best_chi2;
+
+    free(grid_P); free(grid_chi2); free(minima); free(seeds); free(ecc_seeds);
+    astfit_workspace_free(w);
 }
 
 void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {

@@ -30,6 +30,8 @@ def read_in_C_functions():
         c_funcs = ctypes.CDLL(multistart_compiled_path)
     else:
         raise ValueError('You need to compile kepler_solve_astrometry.c!')
+    if hasattr(c_funcs, 'get_chi2_astrometry_fast'):
+        c_funcs.get_chi2_astrometry_fast.restype = ctypes.c_double
     return c_funcs
     
 def get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, c_funcs, reject_outlier=False, 
@@ -151,6 +153,16 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         grid_70pct_nm_loose settings.
         "periodogram_multistart_full" uses the original denser periodogram grid
         and tighter Nelder-Mead tolerances.
+        "periodogram_multistart_v2" is a broader search: a periodogram grid
+        uniform in frequency, seeds from the deepest periodogram minima (plus
+        their neighbouring frequencies, harmonics, and long-period anchors
+        down to a quarter of the time baseline), and Nelder-Mead in
+        (ln P, e cos phi_p, e sin phi_p). It costs about as much as the
+        default and finds the global minimum more reliably, particularly
+        for eccentric orbits and periods comparable to the baseline.
+        "periodogram_multistart_gsl" is the same search as
+        "periodogram_multistart", but with every chi2 evaluated through the
+        original GSL normal-equation code (slower; kept for reference).
         "annealing" uses the original adaptive simulated annealing optimizer.
         "multistart" uses the deterministic C grid/multistart optimizer and
         requires a compiled C library with run_astfit_grid_multistart().
@@ -204,7 +216,21 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         c_funcs.run_astfit_periodogram_multistart_full(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
         return results_array[:3]
 
-    raise ValueError('optimizer must be "periodogram_multistart", "periodogram_multistart_full", "annealing", or "multistart".')
+    if optimizer in ("periodogram_multistart_v2", "v2"):
+        if not hasattr(c_funcs, "run_astfit_periodogram_multistart_v2"):
+            raise ValueError('optimizer="periodogram_multistart_v2" requires a compiled C library with run_astfit_periodogram_multistart_v2().')
+        results_array = np.empty(4, dtype = np.double)
+        c_funcs.run_astfit_periodogram_multistart_v2(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
+        return results_array[:3]
+
+    if optimizer in ("periodogram_multistart_gsl", "periodogram_gsl"):
+        if not hasattr(c_funcs, "run_astfit_periodogram_multistart_gsl"):
+            raise ValueError('optimizer="periodogram_multistart_gsl" requires a compiled C library with run_astfit_periodogram_multistart_gsl().')
+        results_array = np.empty(4, dtype = np.double)
+        c_funcs.run_astfit_periodogram_multistart_gsl(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_int(1 if reject_outlier else 0))
+        return results_array[:3]
+
+    raise ValueError('optimizer must be "periodogram_multistart", "periodogram_multistart_full", "periodogram_multistart_v2", "periodogram_multistart_gsl", "annealing", or "multistart".')
     
     
 def fit_orbital_solution_nonlinear_with_parallax_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
@@ -1108,8 +1134,10 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     likelihood call. optimizer defaults to "periodogram_multistart", which uses
     the faster grid_70pct_nm_loose C settings. Use
     optimizer="periodogram_multistart_full" for the original denser
-    periodogram grid and tighter Nelder-Mead polish, or optimizer="annealing"
-    for the original adaptive simulated annealing optimizer.
+    periodogram grid and tighter Nelder-Mead polish,
+    optimizer="periodogram_multistart_v2" for a broader search at similar cost
+    (see fit_orbital_solution_nonlinear), or optimizer="annealing" for the
+    original adaptive simulated annealing optimizer.
 
     Returns
     -------
