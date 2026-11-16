@@ -44,7 +44,7 @@ If you already downloaded the data for an older version of gaiamock, you don't n
 - if you installed from your existing clone with `pip install -e .`, the healpix_scans/ directory (and healpix_16_med_ruwe.npz) at the top of the clone, where older versions of these instructions put them, is still found automatically.
 - otherwise, set `GAIAMOCK_DATA_DIR=/path/to/old/gaiamock` (the directory containing healpix_scans/), or move healpix_scans/ into ~/.gaiamock.
 
-(4) You are ready to go! Some basic functionality is demonstrated in the docs/demo.ipynb notebook. You can check that everything works with `pip install -e ".[test]"` and then `pytest`. 
+(4) You are ready to go! Some basic functionality is demonstrated in the [demo notebook](docs/demo.ipynb). The [orbit-fitting tutorial](docs/orbit_fitting_tutorial.ipynb) walks through fitting mock epoch astrometry and comparing optimizers. Orbit fitting defaults to `periodogram_multistart_v2`; pass `optimizer="periodogram_multistart"` to use the previous search. You can check that everything works with `pip install -e ".[test]"` and then `pytest`.
 
 A simple bash submission script to run on a cluster is provided in docs/example_bash_submission.py. That reproduces Fig 13 of the paper. 
 

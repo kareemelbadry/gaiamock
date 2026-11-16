@@ -1,3 +1,5 @@
+import ctypes
+
 import healpy as hp
 import numpy as np
 import pytest
@@ -35,6 +37,7 @@ def fake_unbinned_data(tmp_path, monkeypatch):
 def test_c_library_loads():
     c_funcs = gaiamock.read_in_C_functions()
     assert c_funcs.run_astfit_periodogram_multistart is not None
+    assert c_funcs.run_astfit_periodogram_multistart_v2 is not None
 
 
 @pytest.mark.parametrize('ecc', [0.0, 0.3, 0.9])
@@ -45,22 +48,18 @@ def test_kepler_solver(ecc):
     np.testing.assert_allclose(E - ecc * np.sin(E), M, atol=1e-8)
 
 
-def test_orbit_fit_recovers_period():
+def synthetic_epoch_astrometry(rng, c_funcs, period=300.0, ecc=0.3, Tp=50.0, a0_mas=3.0, ast_err=0.05):
     '''
-    end-to-end check of the compiled optimizer on synthetic scans, so this doesn't need the healpix_scans data:
-    same model as predict_astrometry_binary_in_terms_of_a0(), with made-up scan times, angles and parallax factors
+    same model as predict_astrometry_binary_in_terms_of_a0(), with made-up scan times, angles and parallax factors,
+    so the tests don't need the healpix_scans data. 25 visibility periods spread over ~3 years, each with 3 transits
+    a few hours apart.
     '''
-    rng = np.random.default_rng(42)
-    c_funcs = gaiamock.read_in_C_functions()
-
-    # 25 visibility periods spread over ~3 years, each with 3 transits a few hours apart
     t_ast_yr = np.repeat(np.linspace(-1.4, 1.4, 25), 3) + np.tile([0, 0.25, 0.5], 25) / 365.25
     psi = np.repeat(rng.uniform(0, 2 * np.pi, 25), 3)
     plx_factor = np.repeat(rng.uniform(-1, 1, 25), 3)
 
-    period, ecc, Tp, a0_mas = 300.0, 0.3, 50.0, 3.0
     omega, inc, w = 1.0, 0.8, 2.0
-    parallax, pmra, pmdec, ast_err = 5.0, 10.0, -20.0, 0.05
+    parallax, pmra, pmdec = 5.0, 10.0, -20.0
 
     EE = gaiamock.solve_kepler_eqn_on_array(M=2 * np.pi / period * (t_ast_yr * 365.25 - Tp), ecc=ecc, c_funcs=c_funcs)
     A = a0_mas * (np.cos(w) * np.cos(omega) - np.sin(w) * np.sin(omega) * np.cos(inc))
@@ -71,14 +70,84 @@ def test_orbit_fit_recovers_period():
     x, y = B * X + G * Y, A * X + F * Y
     ast_obs = (pmra * t_ast_yr * np.sin(psi) + pmdec * t_ast_yr * np.cos(psi) + parallax * plx_factor
                + y * np.cos(psi) + x * np.sin(psi) + ast_err * rng.standard_normal(len(psi)))
+    return t_ast_yr, psi, plx_factor, ast_obs, ast_err * np.ones_like(ast_obs)
 
-    res = gaiamock.fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err * np.ones_like(ast_obs),
-                                                c_funcs, skip_acceleration=True)
+
+@pytest.mark.parametrize('optimizer', ['periodogram_multistart', 'periodogram_multistart_v2'])
+def test_orbit_fit_recovers_period(optimizer):
+    '''
+    end-to-end check of the compiled optimizers on synthetic scans
+    '''
+    rng = np.random.default_rng(42)
+    c_funcs = gaiamock.read_in_C_functions()
+    period, ecc, a0_mas, parallax = 300.0, 0.3, 3.0, 5.0
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = synthetic_epoch_astrometry(rng, c_funcs, period=period, ecc=ecc, a0_mas=a0_mas)
+
+    res = gaiamock.fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs,
+                                                skip_acceleration=True, optimizer=optimizer)
     fit_plx, fit_period, fit_ecc, fit_a0 = res[0], res[10], res[14], res[17]
     assert fit_period == pytest.approx(period, rel=0.02)
     assert fit_ecc == pytest.approx(ecc, abs=0.05)
     assert fit_a0 == pytest.approx(a0_mas, rel=0.05)
     assert fit_plx == pytest.approx(parallax, abs=0.1)
+
+
+@pytest.mark.parametrize('reject_outlier', [False, True])
+def test_fast_chi2_matches_gsl(reject_outlier):
+    '''
+    the optimizers' chi2 (orthogonalized fixed columns, delete-one identity for reject_outlier) should agree with the
+    GSL normal-equation chi2 used everywhere else
+    '''
+    rng = np.random.default_rng(1)
+    c_funcs = gaiamock.read_in_C_functions()
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = synthetic_epoch_astrometry(rng, c_funcs, period=700.0, ecc=0.6)
+    ast_obs[10] += 2.0  # an outlier, so reject_outlier has something to do
+    for P, phi_p, ecc in [(700.0, 1.0, 0.6), (31.7, 4.0, 0.0), (12.3, 0.2, 0.95), (9000.0, 5.5, 0.4), (365.25, 3.0, 0.99)]:
+        chi2_gsl, _ = gaiamock.get_astrometric_chi2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, c_funcs,
+                                                    reject_outlier=reject_outlier)
+        chi2_fast = c_funcs.get_chi2_astrometry_fast(
+            ctypes.c_int(len(t_ast_yr)), *[ctypes.c_void_p(np.ascontiguousarray(a, dtype=np.double).ctypes.data) for a in
+                                           (t_ast_yr, psi, plx_factor, ast_obs, ast_err)],
+            ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc), ctypes.c_int(int(reject_outlier)))
+        assert chi2_fast == pytest.approx(chi2_gsl, rel=1e-9)
+
+
+@pytest.mark.parametrize('reject_outlier', [False, True])
+def test_previous_optimizer_matches_gsl_version(reject_outlier):
+    '''
+    periodogram_multistart runs the same search as before, only with the faster chi2, so it should land on the same
+    solution as the GSL implementation
+    '''
+    rng = np.random.default_rng(7)
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(rng, c_funcs, period=450.0, ecc=0.5, a0_mas=1.0)
+    fast = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier=reject_outlier,
+                                                   optimizer='periodogram_multistart')
+    slow = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier=reject_outlier,
+                                                   optimizer='periodogram_multistart_gsl')
+    np.testing.assert_allclose(fast, slow, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize('fit_name', ['fit_orbital_solution_nonlinear', 'fit_full_astrometric_cascade'])
+@pytest.mark.parametrize('kwargs', [{}, {'optimizer': None}, {'optimizer': 'default'}], ids=['omitted', 'none', 'default'])
+def test_default_optimizer_uses_v2(fit_name, kwargs, monkeypatch):
+    '''Both public entry points must dispatch all default spellings to the real compiled v2 search.'''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(np.random.default_rng(42), c_funcs)
+    run_v2 = c_funcs.run_astfit_periodogram_multistart_v2
+    calls = []
+
+    def record_v2(*args):
+        calls.append(True)
+        return run_v2(*args)
+
+    monkeypatch.setattr(c_funcs, 'run_astfit_periodogram_multistart_v2', record_v2)
+    options = dict(kwargs)
+    if fit_name == 'fit_full_astrometric_cascade':
+        options['skip_acceleration'] = True
+    result = getattr(gaiamock, fit_name)(*data, c_funcs, **options)
+    assert len(calls) == 1
+    assert np.all(np.isfinite(result))
 
 
 def test_unbinned_single_source(fake_unbinned_data):
