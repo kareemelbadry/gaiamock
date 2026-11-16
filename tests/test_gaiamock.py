@@ -37,6 +37,7 @@ def fake_unbinned_data(tmp_path, monkeypatch):
 def test_c_library_loads():
     c_funcs = gaiamock.read_in_C_functions()
     assert c_funcs.run_astfit_periodogram_multistart is not None
+    assert c_funcs.run_astfit_periodogram_multistart_v2 is not None
 
 
 @pytest.mark.parametrize('ecc', [0.0, 0.3, 0.9])
@@ -112,18 +113,41 @@ def test_fast_chi2_matches_gsl(reject_outlier):
 
 
 @pytest.mark.parametrize('reject_outlier', [False, True])
-def test_default_optimizer_matches_gsl_version(reject_outlier):
+def test_previous_optimizer_matches_gsl_version(reject_outlier):
     '''
-    the default optimizer runs the same search as before, only with the faster chi2, so it should land on the same
+    periodogram_multistart runs the same search as before, only with the faster chi2, so it should land on the same
     solution as the GSL implementation
     '''
     rng = np.random.default_rng(7)
     c_funcs = gaiamock.read_in_C_functions()
     data = synthetic_epoch_astrometry(rng, c_funcs, period=450.0, ecc=0.5, a0_mas=1.0)
-    fast = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier=reject_outlier)
+    fast = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier=reject_outlier,
+                                                   optimizer='periodogram_multistart')
     slow = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier=reject_outlier,
                                                    optimizer='periodogram_multistart_gsl')
     np.testing.assert_allclose(fast, slow, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize('fit_name', ['fit_orbital_solution_nonlinear', 'fit_full_astrometric_cascade'])
+@pytest.mark.parametrize('kwargs', [{}, {'optimizer': None}, {'optimizer': 'default'}], ids=['omitted', 'none', 'default'])
+def test_default_optimizer_uses_v2(fit_name, kwargs, monkeypatch):
+    '''Both public entry points must dispatch all default spellings to the real compiled v2 search.'''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(np.random.default_rng(42), c_funcs)
+    run_v2 = c_funcs.run_astfit_periodogram_multistart_v2
+    calls = []
+
+    def record_v2(*args):
+        calls.append(True)
+        return run_v2(*args)
+
+    monkeypatch.setattr(c_funcs, 'run_astfit_periodogram_multistart_v2', record_v2)
+    options = dict(kwargs)
+    if fit_name == 'fit_full_astrometric_cascade':
+        options['skip_acceleration'] = True
+    result = getattr(gaiamock, fit_name)(*data, c_funcs, **options)
+    assert len(calls) == 1
+    assert np.all(np.isfinite(result))
 
 
 def test_unbinned_single_source(fake_unbinned_data):
