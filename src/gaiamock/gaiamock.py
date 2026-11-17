@@ -2030,7 +2030,7 @@ def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, sam
     this function evaluates the likelihood for a set of astrometric measurements characterized by 
         (t_ast_yr, psi, plx_factor, ast_obs, ast_err) on a set of sample (P, e, phi_0)
     
-    on my laptop, this evaluates 10^7 likelihood samples in about 45 seconds 
+    on a 14-core M4 Pro laptop, this evaluates 10^7 likelihood samples (75 epochs) in about 6 seconds 
     returns L = np.exp(lnL)
     '''
     from joblib import Parallel, delayed 

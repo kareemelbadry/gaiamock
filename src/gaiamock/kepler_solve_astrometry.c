@@ -2665,8 +2665,16 @@ void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor
 
 
 /* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc. 
+lnL = -chi2/2 at the best-fit linear parameters, evaluated with the same fast chi2 as the optimizers. 
 */
 void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array){
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, 0);
+    for (int i = 0; i < n_samp; i++) lnL_array[i] = -0.5 * astfit_workspace_chi2(w, P[i], phi_p[i], ecc[i]);
+    astfit_workspace_free(w);
+}
+
+/* The previous implementation of get_likelihoods_astrometry() (GSL normal equations); kept for testing. */
+void get_likelihoods_astrometry_gsl(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array){
     double xtol = 1e-10;
     double Ei;
     double Mi;

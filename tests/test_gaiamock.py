@@ -155,6 +155,22 @@ def test_fast_chi2_sequence_matches_gsl(reject_outlier):
     np.testing.assert_allclose(scan, expected, rtol=1e-9)
 
 
+def test_rejection_sampling_likelihoods_match_gsl():
+    '''get_likelihoods_astrometry() (rejection sampling) uses the fast chi2; it should match the GSL implementation'''
+    rng = np.random.default_rng(5)
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(rng, c_funcs, period=300.0, ecc=0.3, a0_mas=0.3)
+    np.random.seed(5)
+    P, ecc, phi_p = gaiamock.generate_prior_samples(3000)
+    lnL = gaiamock.get_astrometric_likelihoods_worker(*data, (P, ecc, phi_p))
+    arrs = [np.ascontiguousarray(a, dtype=np.double) for a in list(data) + [P, phi_p, ecc]]
+    lnL_gsl = np.empty(len(P))
+    c_funcs.get_likelihoods_astrometry_gsl(ctypes.c_int(len(data[0])), ctypes.c_int(len(P)),
+                                           *[ctypes.c_void_p(a.ctypes.data) for a in arrs],
+                                           ctypes.c_void_p(lnL_gsl.ctypes.data))
+    np.testing.assert_allclose(lnL, lnL_gsl, rtol=1e-9)
+
+
 @pytest.mark.parametrize('reject_outlier', [False, True])
 def test_previous_optimizer_matches_gsl_version(reject_outlier):
     '''
