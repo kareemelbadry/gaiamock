@@ -1103,6 +1103,9 @@ typedef struct {
     double *res;    /* n scratch: residual */
     double tspan;   /* time baseline in days */
     double *t, *psi, *pf, *y, *err;
+    double *kwbuf;  /* 4*n: previous Kepler solution per epoch (M, E - M, cos E, sin E), for warm starts */
+    double kw_e;    /* eccentricity of that solution */
+    int kw_valid;
 } AstfitWorkspace;
 
 static double ws_dot(const double* x, const double* y, int n) {
@@ -1154,7 +1157,8 @@ static double ws_orth(double* v, const double* Q, int nq, int n) {
 static void ws_build(AstfitWorkspace* w, double* t, double* psi, double* pf, double* y, double* err, int n, int reject, int skip) {
     w->n = n; w->reject = reject;
     w->t = t; w->psi = psi; w->pf = pf; w->y = y; w->err = err;
-    double* buf = (double*)malloc(sizeof(double) * (long)n * 15);
+    double* buf = (double*)malloc(sizeof(double) * (long)n * 19);
+    w->kwbuf = buf + 15 * n; w->kw_e = 0.0; w->kw_valid = 0;
     w->a = buf; w->sw = buf + n; w->cw = buf + 2 * n; w->Q = buf + 3 * n;
     w->r0 = buf + 8 * n; w->h0 = buf + 9 * n; w->Qo = buf + 10 * n; w->res = buf + 14 * n;
     double tmin = t[0], tmax = t[0];
@@ -1195,7 +1199,10 @@ static void ws_build(AstfitWorkspace* w, double* t, double* psi, double* pf, dou
     }
 }
 
+static void ktab_init(void);
+
 static AstfitWorkspace* astfit_workspace_create(double* t, double* psi, double* pf, double* y, double* err, int n, int reject) {
+    ktab_init();
     AstfitWorkspace* w = (AstfitWorkspace*)malloc(sizeof(AstfitWorkspace));
     ws_build(w, t, psi, pf, y, err, n, reject, -1);
     return w;
@@ -1265,8 +1272,197 @@ static double ws_chi2_all(AstfitWorkspace* w, double P, double phi_p, double ecc
     return ws_dot(w->res, w->res, n);
 }
 
+/* ------------- faster chi2 evaluation: Kepler starters and a 4x4 Schur-complement solve -------------
+
+   astfit_workspace_chi2() first tries ws_chi2_schur(), which gives the same chi2 as ws_chi2_all()
+   (to ~1e-13 relative without outlier rejection, ~1e-10 with it) but is about twice as fast:
+   1. The Kepler equation is solved with the same third-order iteration and stopping rule as
+      kepler_cos_sin() (plus a check against false convergence from a poor start), but from a
+      better starting point, so most epochs need one sin/cos pair instead of three:
+      - for the eccentricities of the v2 eccentric grid, a cubic Hermite interpolant of E(M),
+        tabulated once per process;
+      - otherwise, if (M, e) moved little since the previous chi2 call on this workspace (as
+        between Nelder-Mead steps), the previous E plus a first-order correction.
+   2. The 4 orbital columns are not orthogonalized one by one. A single pass over the epochs
+      accumulates their overlaps with the orthonormal fixed columns, their Gram matrix and their
+      overlap with the projected data. The 4x4 Schur complement is solved by Cholesky, and a
+      second pass forms the residual explicitly.
+   ws_chi2_schur() returns 0, and the caller uses ws_chi2_all(), if any orbital column keeps less
+   than 1e-2 of its norm after projecting out the fixed and preceding orbital columns (where the
+   normal equations lose accuracy; mostly at the longest periods), or if the rejected epoch
+   has leverage ~1. */
+#define KTAB_N 4096
+#define KTAB_NE 5
+static const double ktab_e[KTAB_NE] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* must match the v2 eccentric grid */
+static double ktab_E[KTAB_NE][KTAB_N + 1], ktab_dEdM[KTAB_NE][KTAB_N + 1];
+static int ktab_claimed = 0, ktab_ready = 0;
+
+/* Fill the tables once. Callers that find them not yet ready simply don't use them. */
+static void ktab_init(void) {
+    if (__atomic_load_n(&ktab_ready, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_exchange_n(&ktab_claimed, 1, __ATOMIC_ACQ_REL)) return;
+    for (int ie = 0; ie < KTAB_NE; ie++) {
+        double e = ktab_e[ie];
+        for (int i = 0; i <= KTAB_N; i++) {
+            double M = 2 * PI * i / KTAB_N, E = KeplerStart3(e, M);
+            for (int it = 0; it < 100; it++) {
+                double d = (E - e * sin(E) - M) / (1 - e * cos(E));
+                E -= d;
+                if (fabs(d) < 1e-15) break;
+            }
+            ktab_E[ie][i] = E;
+            ktab_dEdM[ie][i] = 1.0 / (1 - e * cos(E));
+        }
+    }
+    __atomic_store_n(&ktab_ready, 1, __ATOMIC_RELEASE);
+}
+
+static inline int ktab_index(double ecc) {
+    if (!__atomic_load_n(&ktab_ready, __ATOMIC_ACQUIRE)) return -1;
+    for (int i = 0; i < KTAB_NE; i++) if (ecc == ktab_e[i]) return i;
+    return -1;
+}
+
+/* starting guess for E at M in [0, 2 pi) */
+static inline double ktab_start(int ie, double M) {
+    double u = M * (KTAB_N / (2 * PI));
+    int i = (int)u;
+    if (i >= KTAB_N) i = KTAB_N - 1;
+    double t = u - i, h = 2 * PI / KTAB_N, t2 = t * t, t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * ktab_E[ie][i] + (t3 - 2 * t2 + t) * h * ktab_dEdM[ie][i]
+         + (-2 * t3 + 3 * t2) * ktab_E[ie][i + 1] + (t3 - t2) * h * ktab_dEdM[ie][i + 1];
+}
+
+/* The iteration of kepler_cos_sin() from the starting point E. Returns the converged E (and its
+   cos, sin), or NAN if not converged within max_it iterations. Far from the root the third-order
+   denominator can blow up and make the correction d small without convergence, so the Newton step
+   must be small too. */
+static inline double kepler_iter(double M, double ecc, double E, int max_it, double* cE, double* sE) {
+    for (int it = 0; it < max_it; it++) {
+        double c = cos(E), s = sin(E);
+        double t2 = -1 + ecc * c, t4 = ecc * s, t5 = -E + t4 + M;
+        double t6 = t5 / (0.5 * t5 * t4 / t2 + t2);
+        double d = t5 / ((0.5 * s - (1.0 / 6.0) * c * t6) * ecc * t6 + t2);
+        if (fabs(d) < 1e-4 && fabs(t5) < 1e-4 * fabs(t2)) {
+            double d2 = d * d;
+            double cd = 1.0 - d2 * (0.5 - d2 / 24.0), sd = d * (1.0 - d2 * (1.0 / 6.0 - d2 / 120.0));
+            *cE = c * cd + s * sd;
+            *sE = s * cd - c * sd;
+            return E - d;
+        }
+        E -= d;
+    }
+    return NAN;
+}
+
+/* Solve for epoch j, with a table starter (itab >= 0), a warm start from the previous call
+   (w->kw_valid; de = change in e since then), or KeplerStart3. Stores the solution for the next call. */
+static inline void kepler_cos_sin_ws(AstfitWorkspace* w, int j, double Mi, double ecc, int itab, double de, double* cE, double* sE) {
+    double M = Mi - (2 * PI) * floor(Mi * (1.0 / (2 * PI)));
+    if (M < 0.0) M += 2 * PI;
+    if (M >= 2 * PI) M -= 2 * PI;
+    double *wM = w->kwbuf, *wD = wM + w->n, *wc = wD + w->n, *ws = wc + w->n;
+    double E = NAN;
+    if (ecc == 0.0) { *cE = cos(M); *sE = sin(M); E = M; }
+    else {
+        if (itab >= 0) E = kepler_iter(M, ecc, ktab_start(itab, M), 8, cE, sE);
+        else if (w->kw_valid) {
+            double dM = M - wM[j];
+            if (dM > PI) dM -= 2 * PI; else if (dM < -PI) dM += 2 * PI;
+            if (fabs(dM) < 0.3) {
+                /* E - M at the new (M, e), to first order */
+                double Eg = M + wD[j] + (dM * ecc * wc[j] + de * ws[j]) / (1 - ecc * wc[j]);
+                if (Eg > M + ecc) Eg = M + ecc; else if (Eg < M - ecc) Eg = M - ecc;
+                E = kepler_iter(M, ecc, Eg, 8, cE, sE);
+            }
+        }
+        if (!(E == E)) E = kepler_iter(M, ecc, KeplerStart3(ecc, M), 100, cE, sE);
+        if (!(E == E)) { kepler_cos_sin(Mi, ecc, cE, sE); E = atan2(*sE, *cE); }
+    }
+    wM[j] = M; wD[j] = E - M; wc[j] = *cE; ws[j] = *sE;
+}
+
+static int ws_chi2_schur(AstfitWorkspace* w, double P, double phi_p, double ecc, double* chi2_out) {
+    int n = w->n, nf = w->nfix;
+    double sq = sqrt(1 - ecc * ecc);
+    double* B = w->Qo;
+    double G[5][4] = {{0}}, H[4][4] = {{0}}, b[4] = {0};
+    int itab = ktab_index(ecc);
+    double de = ecc - w->kw_e;
+    if (fabs(de) > 0.05) w->kw_valid = 0;
+    for (int j = 0; j < n; j++) {
+        double cE, sE;
+        kepler_cos_sin_ws(w, j, w->a[j] / P - phi_p, ecc, itab, de, &cE, &sE);
+        double X = cE - ecc, Y = sq * sE;
+        double v0 = X * w->sw[j], v1 = Y * w->sw[j], v2 = X * w->cw[j], v3 = Y * w->cw[j];
+        B[j] = v0; B[n + j] = v1; B[2 * n + j] = v2; B[3 * n + j] = v3;
+        for (int k = 0; k < nf; k++) {
+            double q = w->Q[(long)k * n + j];
+            G[k][0] += q * v0; G[k][1] += q * v1; G[k][2] += q * v2; G[k][3] += q * v3;
+        }
+        H[0][0] += v0 * v0; H[1][0] += v1 * v0; H[1][1] += v1 * v1;
+        H[2][0] += v2 * v0; H[2][1] += v2 * v1; H[2][2] += v2 * v2;
+        H[3][0] += v3 * v0; H[3][1] += v3 * v1; H[3][2] += v3 * v2; H[3][3] += v3 * v3;
+        double r = w->r0[j];
+        b[0] += v0 * r; b[1] += v1 * r; b[2] += v2 * r; b[3] += v3 * r;
+    }
+    w->kw_e = ecc;
+    w->kw_valid = 1;
+    /* Cholesky of S = H - G^T G */
+    double Lc[4][4];
+    for (int c = 0; c < 4; c++) {
+        for (int d = 0; d <= c; d++) {
+            double s = H[c][d];
+            for (int k = 0; k < nf; k++) s -= G[k][c] * G[k][d];
+            for (int m = 0; m < d; m++) s -= Lc[c][m] * Lc[d][m];
+            if (d == c) {
+                if (!(H[c][c] > 0) || !(s > 1e-4 * H[c][c])) return 0;
+                Lc[c][c] = sqrt(s);
+            } else Lc[c][d] = s / Lc[d][d];
+        }
+    }
+    double y[4], beta[4];
+    for (int c = 0; c < 4; c++) {
+        double s = b[c];
+        for (int m = 0; m < c; m++) s -= Lc[c][m] * y[m];
+        y[c] = s / Lc[c][c];
+    }
+    for (int c = 3; c >= 0; c--) {
+        double s = y[c];
+        for (int m = c + 1; m < 4; m++) s -= Lc[m][c] * beta[m];
+        beta[c] = s / Lc[c][c];
+    }
+    /* residual = r0 - (B - Q G) beta */
+    double gam[5] = {0};
+    for (int k = 0; k < nf; k++) gam[k] = G[k][0] * beta[0] + G[k][1] * beta[1] + G[k][2] * beta[2] + G[k][3] * beta[3];
+    double chi2 = 0.0, rw = 0.0;
+    int worst = 0;
+    for (int j = 0; j < n; j++) {
+        double r = w->r0[j] - beta[0] * B[j] - beta[1] * B[n + j] - beta[2] * B[2 * n + j] - beta[3] * B[3 * n + j];
+        for (int k = 0; k < nf; k++) r += gam[k] * w->Q[(long)k * n + j];
+        chi2 += r * r;
+        if (r * r > rw) { rw = r * r; worst = j; }
+    }
+    if (!w->reject) { *chi2_out = chi2; return 1; }
+    /* delete-one identity, with leverage h0 + v^T S^-1 v for the projected orbital row v */
+    double h = w->h0[worst], z[4];
+    for (int c = 0; c < 4; c++) {
+        double s = B[(long)c * n + worst];
+        for (int k = 0; k < nf; k++) s -= w->Q[(long)k * n + worst] * G[k][c];
+        for (int m = 0; m < c; m++) s -= Lc[c][m] * z[m];
+        z[c] = s / Lc[c][c];
+        h += z[c] * z[c];
+    }
+    double denom = 1.0 - h;
+    if (!(denom > 1e-10 && isfinite(denom))) return 0;
+    *chi2_out = chi2 - rw / denom;
+    return 1;
+}
+
 /* chi2 at (P, phi_p, ecc), with the worst epoch removed if w->reject. */
 static double astfit_workspace_chi2(AstfitWorkspace* w, double P, double phi_p, double ecc) {
+    double fast;
+    if (ws_chi2_schur(w, P, phi_p, ecc, &fast)) return fast;
     int nor;
     double chi2 = ws_chi2_all(w, P, phi_p, ecc, &nor);
     if (!w->reject) return chi2;
@@ -1301,6 +1497,14 @@ double get_chi2_astrometry_fast(int n_obs, double *t_ast_yr, double *psi, double
     double chi2 = astfit_workspace_chi2(w, P, phi_p, ecc);
     astfit_workspace_free(w);
     return chi2;
+}
+
+/* chi2 at n_eval points (P[i], phi_p[i], ecc[i]) evaluated in order on one workspace, as the
+   optimizers do (so later points can warm-start the Kepler solve from earlier ones). Exposed for testing. */
+void get_chi2_astrometry_fast_sequence(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, int n_eval, double *P, double *phi_p, double *ecc, int reject_outlier, double *chi2_out) {
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier);
+    for (int i = 0; i < n_eval; i++) chi2_out[i] = astfit_workspace_chi2(w, P[i], phi_p[i], ecc[i]);
+    astfit_workspace_free(w);
 }
 
 /* ------------- Nelder-Mead on the fast objective (same logic as polish_astfit_start_nelder_mead_config) ------------- */
@@ -1614,7 +1818,7 @@ void run_astfit_periodogram_multistart_v2(double* t_ast_yr, double* psi, double 
     }
 
     /* 3. eccentric grid at each seed period -> best (phi_p, e) per seed */
-    double ecc_grid[5] = {0.2, 0.4, 0.6, 0.8, 0.95};
+    double ecc_grid[5] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* ktab_e tabulates E(M) at these */
     AstfitSeed* ecc_seeds = (AstfitSeed*)malloc(sizeof(AstfitSeed) * (n_seeds > 0 ? n_seeds : 1));
     for (int s = 0; s < n_seeds; s++) {
         int n_phase = (s < n_dense_seeds) ? ASTFIT_V2_N_PHASE_PEAK : ASTFIT_V2_N_PHASE_ANCHOR;
@@ -2461,8 +2665,16 @@ void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor
 
 
 /* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc. 
+lnL = -chi2/2 at the best-fit linear parameters, evaluated with the same fast chi2 as the optimizers. 
 */
 void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array){
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, 0);
+    for (int i = 0; i < n_samp; i++) lnL_array[i] = -0.5 * astfit_workspace_chi2(w, P[i], phi_p[i], ecc[i]);
+    astfit_workspace_free(w);
+}
+
+/* The previous implementation of get_likelihoods_astrometry() (GSL normal equations); kept for testing. */
+void get_likelihoods_astrometry_gsl(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array){
     double xtol = 1e-10;
     double Ei;
     double Mi;
