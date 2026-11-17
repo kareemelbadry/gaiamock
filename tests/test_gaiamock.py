@@ -112,6 +112,49 @@ def test_fast_chi2_matches_gsl(reject_outlier):
         assert chi2_fast == pytest.approx(chi2_gsl, rel=1e-9)
 
 
+def fast_chi2_sequence(c_funcs, data, P, phi_p, ecc, reject_outlier):
+    '''chi2 at each (P, phi_p, ecc), evaluated in order on one C workspace, as inside the optimizers'''
+    arrs = [np.ascontiguousarray(a, dtype=np.double) for a in data]
+    pts = [np.ascontiguousarray(a, dtype=np.double) for a in (P, phi_p, ecc)]
+    out = np.zeros(len(pts[0]))
+    c_funcs.get_chi2_astrometry_fast_sequence(
+        ctypes.c_int(len(arrs[0])), *[ctypes.c_void_p(a.ctypes.data) for a in arrs], ctypes.c_int(len(out)),
+        *[ctypes.c_void_p(a.ctypes.data) for a in pts], ctypes.c_int(int(reject_outlier)),
+        ctypes.c_void_p(out.ctypes.data))
+    return out
+
+
+@pytest.mark.parametrize('reject_outlier', [False, True])
+def test_fast_chi2_sequence_matches_gsl(reject_outlier):
+    '''
+    Inside the optimizers, consecutive chi2 calls on one workspace warm-start the Kepler solve from the previous call,
+    and the eccentricities of the v2 grid use a tabulated starter. Neither should change chi2.
+    '''
+    rng = np.random.default_rng(0)
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(rng, c_funcs, period=200.0, ecc=0.8, a0_mas=2.0)
+    data[3][5] += 1.5  # an outlier
+
+    # 1. a long random walk at high eccentricity, with steps from tiny to large: compare with fresh evaluations
+    n = 20000
+    step = 10 ** rng.uniform(-4, -0.5, n)
+    P = 200.0 * np.exp(np.cumsum(0.01 * step * rng.normal(size=n)))
+    phi_p = (1.0 + np.cumsum(step * rng.normal(size=n))) % (2 * np.pi)
+    ecc = np.clip(0.9 + np.cumsum(0.1 * step * rng.normal(size=n)), 0.0, 0.99)
+    walk = fast_chi2_sequence(c_funcs, data, P, phi_p, ecc, reject_outlier)
+    fresh = [fast_chi2_sequence(c_funcs, data, P[i:i + 1], phi_p[i:i + 1], ecc[i:i + 1], reject_outlier)[0]
+             for i in range(n)]
+    np.testing.assert_allclose(walk, fresh, rtol=1e-11)
+
+    # 2. phase scans at the v2 grid eccentricities and e = 0, short to long periods: compare with GSL
+    P, phi_p, ecc = np.array([(p, f, e) for p in [12.0, 200.0, 3000.0, 9500.0] for e in [0.2, 0.4, 0.6, 0.8, 0.95, 0.0]
+                              for f in np.linspace(0, 2 * np.pi, 7)[:-1]]).T
+    scan = fast_chi2_sequence(c_funcs, data, P, phi_p, ecc, reject_outlier)
+    expected = [gaiamock.get_astrometric_chi2(*data, P[i], phi_p[i], ecc[i], c_funcs, reject_outlier=reject_outlier)[0]
+                for i in range(len(P))]
+    np.testing.assert_allclose(scan, expected, rtol=1e-9)
+
+
 @pytest.mark.parametrize('reject_outlier', [False, True])
 def test_previous_optimizer_matches_gsl_version(reject_outlier):
     '''
