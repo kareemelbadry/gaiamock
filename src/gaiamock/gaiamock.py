@@ -150,10 +150,12 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         "periodogram_multistart_v2" is the default. It uses a periodogram grid
         uniform in frequency, seeds from the deepest periodogram minima (plus
         their neighbouring frequencies, harmonics, and long-period anchors
-        down to a quarter of the time baseline), and Nelder-Mead in
+        down to a quarter of the time baseline), an eccentric grid at each
+        seed period (ranked with an approximate chi2 from tabulated Kepler
+        solutions, with the best cells rescored exactly), and Nelder-Mead in
         (ln P, e cos phi_p, e sin phi_p). This broader search is more reliable
-        for eccentric orbits and periods comparable to the baseline, at modest
-        extra cost compared with "periodogram_multistart".
+        for eccentric orbits and periods comparable to the baseline, and costs
+        about the same as "periodogram_multistart".
         "periodogram_multistart" uses the previous search: a C linear
         circular-orbit periodogram to choose period starts before the eccentric
         scan and Nelder-Mead polish, with the grid_70pct_nm_loose settings.
