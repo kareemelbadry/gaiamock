@@ -1669,6 +1669,133 @@ void run_astfit_periodogram_multistart_config(double* t_ast_yr, double* psi, dou
     astfit_workspace_free(w);
 }
 
+/* ------------- approximate chi2 for scoring the v2 eccentric seed grid -------------
+
+   The eccentric grid of run_astfit_periodogram_multistart_v2 only ranks (phi_p, e) cells to pick
+   starting points, so it does not need the exact chi2. grid_chi2_approx() takes
+   X = cos E - e and Y = sqrt(1 - e^2) sin E from a table in M (4096 intervals, linear
+   interpolation, no Kepler iteration) for the five grid eccentricities, and accumulates every sum
+   needed for the 4x4 Schur complement of the orbital columns in a single pass, from per-epoch
+   products of the fixed columns that are computed once per source. It returns chi2 without
+   outlier rejection, to ~4e-4 relative. The best GRID_N_RESCORE cells at each seed period are
+   then rescored with the exact chi2 (including outlier rejection), and the best of those is used,
+   so the approximation only affects which cells are rescored. */
+#define GRID_NT 4096
+#define GRID_NE 5
+#define GRID_N_RESCORE 12
+static const double grid_e[GRID_NE] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* must match the v2 eccentric grid */
+static double grid_X[GRID_NE][GRID_NT + 1], grid_Y[GRID_NE][GRID_NT + 1];
+static int grid_claimed = 0, grid_ready = 0;
+
+/* Fill the tables once. Callers that find them not yet ready use the exact chi2 instead. */
+static void grid_tables_init(void) {
+    if (__atomic_load_n(&grid_ready, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_exchange_n(&grid_claimed, 1, __ATOMIC_ACQ_REL)) return;
+    for (int ie = 0; ie < GRID_NE; ie++) {
+        double e = grid_e[ie], sq = sqrt(1 - e * e);
+        for (int k = 0; k <= GRID_NT; k++) {
+            double M = 2 * PI * k / GRID_NT, E = KeplerStart3(e, M);
+            for (int it = 0; it < 100; it++) {
+                double d = (E - e * sin(E) - M) / (1 - e * cos(E));
+                E -= d;
+                if (fabs(d) < 1e-15) break;
+            }
+            grid_X[ie][k] = cos(E) - e;
+            grid_Y[ie][k] = sq * sin(E);
+        }
+    }
+    __atomic_store_n(&grid_ready, 1, __ATOMIC_RELEASE);
+}
+
+typedef struct {
+    int n;
+    double *W;              /* 12 per epoch: Q_k sin(psi)/err (k < 5), Q_k cos(psi)/err, r0 sin(psi)/err, r0 cos(psi)/err */
+    double *s2, *sc, *c2;   /* sin^2(psi)/err^2, sin(psi) cos(psi)/err^2, cos^2(psi)/err^2 */
+    double rr0;             /* |r0|^2 */
+} GridWorkspace;
+
+static GridWorkspace* grid_workspace_create(AstfitWorkspace* w) {
+    grid_tables_init();
+    if (!__atomic_load_n(&grid_ready, __ATOMIC_ACQUIRE)) return NULL;
+    int n = w->n, nf = w->nfix;
+    GridWorkspace* g = (GridWorkspace*)malloc(sizeof(GridWorkspace));
+    g->n = n;
+    g->W = (double*)calloc((long)n * 15, sizeof(double));
+    g->s2 = g->W + 12 * n; g->sc = g->s2 + n; g->c2 = g->sc + n;
+    g->rr0 = 0.0;
+    for (int j = 0; j < n; j++) {
+        double* wj = g->W + 12 * j;
+        for (int k = 0; k < nf; k++) {
+            wj[k] = w->Q[(long)k * n + j] * w->sw[j];
+            wj[5 + k] = w->Q[(long)k * n + j] * w->cw[j];
+        }
+        wj[10] = w->r0[j] * w->sw[j];
+        wj[11] = w->r0[j] * w->cw[j];
+        g->s2[j] = w->sw[j] * w->sw[j]; g->sc[j] = w->sw[j] * w->cw[j]; g->c2[j] = w->cw[j] * w->cw[j];
+        g->rr0 += w->r0[j] * w->r0[j];
+    }
+    return g;
+}
+
+static void grid_workspace_free(GridWorkspace* g) {
+    if (g) { free(g->W); free(g); }
+}
+
+/* Approximate chi2 (no outlier rejection) at (P, phi_p, grid_e[ie]); NAN if the 4x4 system is degenerate. */
+static double grid_chi2_approx(GridWorkspace* g, AstfitWorkspace* w, double P, double phi_p, int ie) {
+    int n = g->n;
+    double aX[12] = {0}, aY[12] = {0}, h[9] = {0};
+    const double *xt = grid_X[ie], *yt = grid_Y[ie];
+    double s = 1.0 / (2 * PI * P), o = -phi_p / (2 * PI);
+    for (int j = 0; j < n; j++) {
+        double u = w->a[j] * s + o;   /* M / (2 pi) */
+        u -= floor(u);
+        double x = u * GRID_NT;
+        int k = (int)x;
+        if (k >= GRID_NT) k = GRID_NT - 1;
+        double f = x - k;
+        double X = xt[k] + f * (xt[k + 1] - xt[k]), Y = yt[k] + f * (yt[k + 1] - yt[k]);
+        const double* wj = g->W + 12 * j;
+        for (int m = 0; m < 12; m++) { aX[m] += X * wj[m]; aY[m] += Y * wj[m]; }
+        double XX = X * X, XY = X * Y, YY = Y * Y;
+        h[0] += XX * g->s2[j]; h[1] += XY * g->s2[j]; h[2] += YY * g->s2[j];
+        h[3] += XX * g->sc[j]; h[4] += XY * g->sc[j]; h[5] += YY * g->sc[j];
+        h[6] += XX * g->c2[j]; h[7] += XY * g->c2[j]; h[8] += YY * g->c2[j];
+    }
+    /* orbital columns: 0 = X sin(psi), 1 = Y sin(psi), 2 = X cos(psi), 3 = Y cos(psi) (whitened) */
+    double S[4][4] = {{h[0], h[1], h[3], h[4]}, {h[1], h[2], h[4], h[5]}, {h[3], h[4], h[6], h[7]}, {h[4], h[5], h[7], h[8]}};
+    double G[5][4], b[4] = {aX[10], aY[10], aX[11], aY[11]};
+    for (int k = 0; k < 5; k++) { G[k][0] = aX[k]; G[k][1] = aY[k]; G[k][2] = aX[5 + k]; G[k][3] = aY[5 + k]; }
+    /* chi2 = |r0|^2 - b^T (S - G^T G)^-1 b, via Cholesky */
+    double Lc[4][4], z[4], drop = 0.0;
+    for (int c = 0; c < 4; c++) {
+        for (int d = 0; d <= c; d++) {
+            double v = S[c][d];
+            for (int k = 0; k < 5; k++) v -= G[k][c] * G[k][d];
+            for (int m = 0; m < d; m++) v -= Lc[c][m] * Lc[d][m];
+            if (d == c) {
+                if (!(v > 1e-9 * S[c][c])) return NAN;
+                Lc[c][c] = sqrt(v);
+            } else Lc[c][d] = v / Lc[d][d];
+        }
+        double v = b[c];
+        for (int m = 0; m < c; m++) v -= Lc[c][m] * z[m];
+        z[c] = v / Lc[c][c];
+        drop += z[c] * z[c];
+    }
+    return g->rr0 - drop;
+}
+
+/* grid_chi2_approx() at n_eval points (P[i], phi_p[i], ecc = grid_e[ie[i]]) on one source. Exposed for testing;
+   NAN where the approximate system is degenerate. */
+void get_chi2_astrometry_grid_approx(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, int n_eval, double *P, double *phi_p, int *ie, double *chi2_out) {
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, 0);
+    GridWorkspace* g = grid_workspace_create(w);
+    for (int i = 0; i < n_eval; i++) chi2_out[i] = g ? grid_chi2_approx(g, w, P[i], phi_p[i], ie[i]) : NAN;
+    grid_workspace_free(g);
+    astfit_workspace_free(w);
+}
+
 /* ---------------------------------------------------------------------------------------------
    run_astfit_periodogram_multistart_v2: a broader search on the same fast objective.
 
@@ -1682,7 +1809,9 @@ void run_astfit_periodogram_multistart_config(double* t_ast_yr, double* psi, dou
       periodogram of an eccentric orbit often peaks at P/2 or P/3). Long-period anchors run from
       T/4 to P_max every 0.08 in ln P.
    3. At every seed period, an eccentric grid (e = 0.2 ... 0.95; 36 phases at periodogram seeds,
-      18 at anchors) picks the best (phi_p, e).
+      18 at anchors) picks the best (phi_p, e). The cells are ranked with grid_chi2_approx() and the
+      best 12 are rescored with the exact chi2 (run_astfit_periodogram_multistart_v2_exactgrid scores
+      every cell exactly; it is kept for testing).
    4. Nelder-Mead runs in (ln P, e cos phi_p, e sin phi_p), which has no degeneracy at e = 0 and
       wraps phi_p, with an initial ln P step of min(0.05, 0.15 P/T). It is started from all 12
       periodogram minima (circular) and the 24 best eccentric seeds, and the winner gets a final
@@ -1752,7 +1881,7 @@ static int compare_astfit_seed(const void* a, const void* b) {
     return (x < y) ? -1 : (x > y);
 }
 
-void run_astfit_periodogram_multistart_v2(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+static void astfit_v2_search(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier, int approx_grid) {
     AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier);
     double T = fmax(w->tspan, 1.0);
     int full_phase = (U[1] - L[1] >= 2 * PI - 1e-10);
@@ -1818,21 +1947,40 @@ void run_astfit_periodogram_multistart_v2(double* t_ast_yr, double* psi, double 
     }
 
     /* 3. eccentric grid at each seed period -> best (phi_p, e) per seed */
-    double ecc_grid[5] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* ktab_e tabulates E(M) at these */
+    double ecc_grid[5] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* ktab_e and grid_e tabulate E(M) at these */
     AstfitSeed* ecc_seeds = (AstfitSeed*)malloc(sizeof(AstfitSeed) * (n_seeds > 0 ? n_seeds : 1));
+    GridWorkspace* gw = approx_grid ? grid_workspace_create(w) : NULL;
     for (int s = 0; s < n_seeds; s++) {
         int n_phase = (s < n_dense_seeds) ? ASTFIT_V2_N_PHASE_PEAK : ASTFIT_V2_N_PHASE_ANCHOR;
         AstfitSeed b = {INFINITY, seeds[s].period, L[1], 0.0};
+        /* cells kept for exact rescoring, sorted by approximate chi2 */
+        double kc[GRID_N_RESCORE], kp[GRID_N_RESCORE], ke[GRID_N_RESCORE];
+        int nk = 0;
         for (int ie = 0; ie < 5; ie++) {
             if (ecc_grid[ie] < L[2] || ecc_grid[ie] > U[2]) continue;
             for (int ip = 0; ip < n_phase; ip++) {
                 double phi_p = L[1] + (U[1] - L[1]) * ip / (double)n_phase;
-                double chi2 = astfit_workspace_chi2(w, seeds[s].period, phi_p, ecc_grid[ie]);
-                if (chi2 < b.chi2) { b.chi2 = chi2; b.phi_p = phi_p; b.ecc = ecc_grid[ie]; }
+                double chi2 = gw ? grid_chi2_approx(gw, w, seeds[s].period, phi_p, ie) : NAN;
+                if (!(chi2 == chi2)) {
+                    /* exact score: used directly */
+                    chi2 = astfit_workspace_chi2(w, seeds[s].period, phi_p, ecc_grid[ie]);
+                    if (chi2 < b.chi2) { b.chi2 = chi2; b.phi_p = phi_p; b.ecc = ecc_grid[ie]; }
+                    continue;
+                }
+                if (nk < GRID_N_RESCORE || chi2 < kc[nk - 1]) {
+                    int q = (nk < GRID_N_RESCORE) ? nk++ : nk - 1;
+                    while (q > 0 && kc[q - 1] > chi2) { kc[q] = kc[q - 1]; kp[q] = kp[q - 1]; ke[q] = ke[q - 1]; q--; }
+                    kc[q] = chi2; kp[q] = phi_p; ke[q] = ecc_grid[ie];
+                }
             }
+        }
+        for (int q = 0; q < nk; q++) {
+            double chi2 = astfit_workspace_chi2(w, seeds[s].period, kp[q], ke[q]);
+            if (chi2 < b.chi2) { b.chi2 = chi2; b.phi_p = kp[q]; b.ecc = ke[q]; }
         }
         ecc_seeds[s] = b;
     }
+    grid_workspace_free(gw);
     qsort(ecc_seeds, n_seeds, sizeof(AstfitSeed), compare_astfit_seed);
 
     /* 4. local optimization from every periodogram minimum (circular) and the best eccentric seeds */
@@ -1879,6 +2027,16 @@ void run_astfit_periodogram_multistart_v2(double* t_ast_yr, double* psi, double 
 
     free(grid_P); free(grid_chi2); free(minima); free(seeds); free(ecc_seeds);
     astfit_workspace_free(w);
+}
+
+void run_astfit_periodogram_multistart_v2(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    astfit_v2_search(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, results, n_obs, reject_outlier, 1);
+}
+
+/* The same search with every eccentric-grid cell scored by the exact chi2 (the behaviour before the
+   approximate grid scoring was added); kept for testing. */
+void run_astfit_periodogram_multistart_v2_exactgrid(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    astfit_v2_search(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, results, n_obs, reject_outlier, 0);
 }
 
 void run_astfit_periodogram_multistart(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {

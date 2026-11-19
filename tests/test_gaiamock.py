@@ -171,6 +171,49 @@ def test_rejection_sampling_likelihoods_match_gsl():
     np.testing.assert_allclose(lnL, lnL_gsl, rtol=1e-9)
 
 
+def test_grid_chi2_approximation():
+    '''the approximate chi2 used to rank the v2 eccentric grid should be close to the exact chi2 at the grid eccentricities'''
+    rng = np.random.default_rng(9)
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(rng, c_funcs, period=150.0, ecc=0.7, a0_mas=1.0)
+    n = 3000
+    P = np.exp(rng.uniform(np.log(10), np.log(1e4), n)); phi_p = rng.uniform(0, 2 * np.pi, n)
+    ie = rng.integers(0, 5, n).astype(np.int32); ecc = np.array([0.2, 0.4, 0.6, 0.8, 0.95])[ie]
+    arrs = [np.ascontiguousarray(a, dtype=np.double) for a in data]
+    approx = np.zeros(n)
+    c_funcs.get_chi2_astrometry_grid_approx(ctypes.c_int(len(arrs[0])), *[ctypes.c_void_p(a.ctypes.data) for a in arrs],
+                                            ctypes.c_int(n), *[ctypes.c_void_p(a.ctypes.data) for a in (P, phi_p, ie)],
+                                            ctypes.c_void_p(approx.ctypes.data))
+    exact = fast_chi2_sequence(c_funcs, data, P, phi_p, ecc, False)
+    ok = np.isfinite(approx)
+    assert ok.mean() > 0.99
+    np.testing.assert_allclose(approx[ok], exact[ok], rtol=2e-3)
+
+
+@pytest.mark.parametrize('reject_outlier', [False, True])
+def test_v2_approximate_grid_matches_exact_grid(reject_outlier):
+    '''
+    periodogram_multistart_v2 ranks its eccentric seed grid with an approximate chi2 (tabulated Kepler solutions) and
+    rescores the best cells exactly; it should reach the same solution as scoring every cell exactly
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    L = np.array([10.0, 0.0, 0.0]); U = np.array([1e4, 2 * np.pi, 0.99])
+    for k, (period, ecc, a0) in enumerate([(23.0, 0.1, 1.5), (300.0, 0.6, 1.0), (850.0, 0.9, 2.0), (2500.0, 0.4, 3.0),
+                                           (60.0, 0.95, 0.5)]):
+        data = synthetic_epoch_astrometry(np.random.default_rng(100 + k), c_funcs, period=period, ecc=ecc, a0_mas=a0)
+        if reject_outlier:
+            data[3][7] += 1.0
+        arrs = [np.ascontiguousarray(a, dtype=np.double) for a in data]
+        out = {}
+        for name in ['run_astfit_periodogram_multistart_v2', 'run_astfit_periodogram_multistart_v2_exactgrid']:
+            r = np.zeros(4)
+            getattr(c_funcs, name)(*[ctypes.c_void_p(a.ctypes.data) for a in arrs + [L, U, r]],
+                                   ctypes.c_int(len(arrs[0])), ctypes.c_int(int(reject_outlier)))
+            out[name] = r
+        np.testing.assert_allclose(out['run_astfit_periodogram_multistart_v2'],
+                                   out['run_astfit_periodogram_multistart_v2_exactgrid'], rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize('reject_outlier', [False, True])
 def test_previous_optimizer_matches_gsl_version(reject_outlier):
     '''
