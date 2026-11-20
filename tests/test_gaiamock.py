@@ -127,8 +127,8 @@ def fast_chi2_sequence(c_funcs, data, P, phi_p, ecc, reject_outlier):
 @pytest.mark.parametrize('reject_outlier', [False, True])
 def test_fast_chi2_sequence_matches_gsl(reject_outlier):
     '''
-    Inside the optimizers, consecutive chi2 calls on one workspace warm-start the Kepler solve from the previous call,
-    and the eccentricities of the v2 grid use a tabulated starter. Neither should change chi2.
+    Consecutive chi2 calls on one workspace, as inside the optimizers (with the trig-free Kepler solver, at the v2
+    grid eccentricities, at e = 0 and over a long high-eccentricity walk), should match fresh evaluations and GSL.
     '''
     rng = np.random.default_rng(0)
     c_funcs = gaiamock.read_in_C_functions()
@@ -205,13 +205,84 @@ def test_v2_approximate_grid_matches_exact_grid(reject_outlier):
             data[3][7] += 1.0
         arrs = [np.ascontiguousarray(a, dtype=np.double) for a in data]
         out = {}
-        for name in ['run_astfit_periodogram_multistart_v2', 'run_astfit_periodogram_multistart_v2_exactgrid']:
+        for name in ['run_astfit_periodogram_multistart_v2_nm', 'run_astfit_periodogram_multistart_v2_exactgrid']:
             r = np.zeros(4)
             getattr(c_funcs, name)(*[ctypes.c_void_p(a.ctypes.data) for a in arrs + [L, U, r]],
                                    ctypes.c_int(len(arrs[0])), ctypes.c_int(int(reject_outlier)))
             out[name] = r
-        np.testing.assert_allclose(out['run_astfit_periodogram_multistart_v2'],
+        np.testing.assert_allclose(out['run_astfit_periodogram_multistart_v2_nm'],
                                    out['run_astfit_periodogram_multistart_v2_exactgrid'], rtol=1e-6, atol=1e-6)
+
+
+def test_v2_levenberg_marquardt_matches_nelder_mead():
+    '''
+    periodogram_multistart_v2 refines its starts with Levenberg-Marquardt; on clear orbits it should reach the same
+    minimum as refining every start with Nelder-Mead (periodogram_multistart_v2_nm)
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    for k, (period, ecc, a0) in enumerate([(23.0, 0.1, 1.5), (300.0, 0.6, 1.0), (850.0, 0.9, 2.0), (2500.0, 0.4, 3.0),
+                                           (60.0, 0.95, 0.5), (140.0, 0.0, 0.8)]):
+        data = synthetic_epoch_astrometry(np.random.default_rng(200 + k), c_funcs, period=period, ecc=ecc, a0_mas=a0)
+        lm = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs)
+        nm = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, optimizer='periodogram_multistart_v2_nm')
+        chi2_lm = gaiamock.get_astrometric_chi2(*data, *lm, c_funcs)[0]
+        chi2_nm = gaiamock.get_astrometric_chi2(*data, *nm, c_funcs)[0]
+        assert chi2_lm < chi2_nm + 1e-3
+        assert abs(np.log(lm[0] / nm[0])) < 1e-3 and abs(lm[2] - nm[2]) < 1e-2
+
+
+def test_clip_removes_outliers():
+    '''
+    reject_outlier="clip" removes several outliers, including one that the plain search absorbs into an e = 0.99
+    spike (found by the transit-clump prescreen), and returns the fit to the remaining epochs
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = [np.array(a) for a in synthetic_epoch_astrometry(np.random.default_rng(11), c_funcs, period=300.0, ecc=0.3, a0_mas=0.5)]
+    bad = [5, 30, 31, 60]
+    data[3][bad] += np.array([1.5, -2.0, 1.0, -1.2])    # 20-40 sigma
+    res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', max_clipped=4, return_mask=True)
+    np.testing.assert_array_equal(np.flatnonzero(~keep), bad)
+    good = [a[keep] for a in data]
+    np.testing.assert_allclose(res, gaiamock.fit_orbital_solution_nonlinear(*good, c_funcs), rtol=1e-10)
+
+
+def test_clip_cap():
+    '''with more outliers than max_clipped, the plain fit to all epochs is returned'''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = [np.array(a) for a in synthetic_epoch_astrometry(np.random.default_rng(11), c_funcs, period=300.0, ecc=0.3, a0_mas=0.5)]
+    data[3][[5, 30, 31, 60]] += np.array([1.5, -2.0, 1.0, -1.2])
+    res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', max_clipped=3, return_mask=True)
+    assert keep.all()
+    np.testing.assert_allclose(res, gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs), rtol=1e-12)
+    res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', max_clipped=4, return_mask=True)
+    assert (~keep).sum() == 4
+
+
+def test_clip_restores_good_epochs():
+    '''
+    on clean data clipping removes nothing, even when a fast, large orbit makes transits of the same visit disagree
+    and the prescreen flags them: the clipping rounds restore every epoch that fits the orbit
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    for period, a0 in [(300.0, 1.0), (10.5, 5.0)]:
+        data = [np.array(a) for a in synthetic_epoch_astrometry(np.random.default_rng(3), c_funcs, period=period, ecc=0.2, a0_mas=a0)]
+        res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', return_mask=True)
+        assert keep.all()
+        np.testing.assert_allclose(res, gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs), rtol=1e-10)
+
+
+def test_cascade_with_clip():
+    '''the cascade's orbital solution uses the kept epochs and reports them'''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = [np.array(a) for a in synthetic_epoch_astrometry(np.random.default_rng(11), c_funcs, period=300.0, ecc=0.3, a0_mas=1.0)]
+    data[3][[5, 30]] += np.array([1.5, -2.0])
+    res, keep = gaiamock.fit_full_astrometric_cascade(*data, c_funcs, reject_outlier='clip', skip_acceleration=True,
+                                                     ruwe_min=0, return_mask=True)
+    np.testing.assert_array_equal(np.flatnonzero(~keep), [5, 30])
+    assert res[20] == keep.sum()                    # N_obs
+    assert abs(res[10] / 300.0 - 1) < 0.01          # period
+    with pytest.raises(ValueError):
+        gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', optimizer='periodogram_multistart')
 
 
 @pytest.mark.parametrize('reject_outlier', [False, True])
