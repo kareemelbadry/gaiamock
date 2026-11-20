@@ -137,7 +137,7 @@ def get_astrometric_residuals_12par_campbell(t_ast_yr, psi, plx_factor, ast_obs,
 
 def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
     L = np.array([10, 0, 0]), U = np.array([1e4, 2*np.pi, 0.99]), reject_outlier=False,
-    optimizer="periodogram_multistart_v2", clip_sigma=4.5, return_mask=False):
+    optimizer="periodogram_multistart_v2", clip_sigma=4.5, max_clipped=2, return_mask=False):
     '''
     Fit the nonlinear orbital parameters (P, phi_p, e) for epoch astrometry.
 
@@ -184,8 +184,9 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         epochs whose whitened residual exceeds clip_sigma times
         max(1, 1.4826 * median absolute residual of the kept epochs), and
         search again on the kept epochs; repeated up to 4 times, and a
-        clipped epoch returns if it fits a later orbit. Any number of
-        outliers can be removed; with none, the result is the plain fit.
+        clipped epoch returns if it fits a later orbit. At most max_clipped
+        epochs (default 2) are removed: if more would be, the plain fit to
+        all epochs is returned. With no outliers, the result is the plain fit.
 
     Returns
     -------
@@ -213,7 +214,7 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
             raise ValueError('reject_outlier="clip" is only available with optimizer="periodogram_multistart_v2".')
         results_array = np.empty(5, dtype = np.double)
         keep = np.empty(len(t_ast_yr), dtype = np.double)
-        c_funcs.run_astfit_periodogram_multistart_v2_clip(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(keep.ctypes.data), ctypes.c_double(clip_sigma))
+        c_funcs.run_astfit_periodogram_multistart_v2_clip(ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data), ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data), ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(L_double.ctypes.data), ctypes.c_void_p(U_double.ctypes.data),  ctypes.c_void_p(results_array.ctypes.data), ctypes.c_int(len(t_ast_yr)), ctypes.c_void_p(keep.ctypes.data), ctypes.c_double(clip_sigma), ctypes.c_int(int(max_clipped)))
         return (results_array[:3], keep > 0.5) if return_mask else results_array[:3]
     if return_mask:
         return fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, L=L, U=U, reject_outlier=reject_outlier, optimizer=optimizer), np.ones(len(t_ast_yr), dtype=bool)
@@ -1155,7 +1156,7 @@ def fit_5par_solution_only(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned =
     return [mu[0], mu[1], mu[2], mu[3], mu[4], sigma_mu[0], sigma_mu[1], sigma_mu[2], sigma_mu[3], sigma_mu[4], ruwe, sigma5d_max]
         
 
-def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="periodogram_multistart_v2", clip_sigma=4.5, return_mask=False):
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="periodogram_multistart_v2", clip_sigma=4.5, max_clipped=2, return_mask=False):
     '''
     Fit 1D epoch astrometry with the astrometric cascade.
 
@@ -1177,7 +1178,8 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     adaptive simulated annealing optimizer. None and "default" also select v2.
 
     If reject_outlier is "clip", the orbital fit clips outlying epochs (see
-    fit_orbital_solution_nonlinear; clip_sigma sets the threshold) and the
+    fit_orbital_solution_nonlinear; clip_sigma sets the threshold and
+    max_clipped the most epochs that may be removed) and the
     chi2, uncertainties, F2 and N_obs of the orbital solution use only the
     kept epochs. The 5-parameter and acceleration checks use all epochs. If
     return_mask is True, returns (result, keep), where keep is a boolean array
@@ -1259,7 +1261,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
             plot_residuals_7par(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, theta_array = mu, c_funcs = c_funcs)
         return (res, np.ones(len(t_ast_yr), dtype=bool)) if return_mask else res
 
-    res, keep = fit_orbital_solution_nonlinear(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, L = np.array([P_min, 0, 0]), reject_outlier=reject_outlier, optimizer=optimizer, clip_sigma=clip_sigma, return_mask=True)
+    res, keep = fit_orbital_solution_nonlinear(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, L = np.array([P_min, 0, 0]), reject_outlier=reject_outlier, optimizer=optimizer, clip_sigma=clip_sigma, max_clipped=max_clipped, return_mask=True)
     if isinstance(reject_outlier, str):
         # the orbital solution below uses only the kept epochs
         t_ast_yr, psi, plx_factor, ast_obs, ast_err = t_ast_yr[keep], psi[keep], plx_factor[keep], ast_obs[keep], ast_err[keep]

@@ -2140,6 +2140,8 @@ void run_astfit_periodogram_multistart_v2_exactgrid(double* t_ast_yr, double* ps
    the kept set changed, search again with v2 on the kept epochs. Clipped epochs return if they fit a later
    orbit (including epochs flagged by the prescreen). Without outliers nothing is clipped and the result is
    normally the plain v2 fit.
+   If the final mask removes more than max_clipped epochs, the result is the plain v2 fit to all epochs instead
+   (a source that needs many epochs removed to fit an orbit is not treated as an orbit with a few outliers).
    keep_out[i] = 1 for kept epochs, 0 for clipped ones. results = P, phi_p, e, chi2 (kept epochs), n_clipped. */
 #define ASTFIT_CLIP_ROUNDS 4
 #define ASTFIT_CLIP_MIN_KEEP 20
@@ -2281,7 +2283,7 @@ static void v2_on_kept(double* t, double* psi, double* pf, double* y, double* er
     run_astfit_periodogram_multistart_v2(sub, sub + n, sub + 2L * n, sub + 3L * n, sub + 4L * n, L, U, sol, k, 0);
 }
 
-void run_astfit_periodogram_multistart_v2_clip(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, double* keep_out, double clip_sigma) {
+void run_astfit_periodogram_multistart_v2_clip(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, double* keep_out, double clip_sigma, int max_clipped) {
     int n = n_obs;
     int* keep = (int*)malloc(sizeof(int) * n);
     int* trial = (int*)malloc(sizeof(int) * n);
@@ -2303,7 +2305,14 @@ void run_astfit_periodogram_multistart_v2_clip(double* t_ast_yr, double* psi, do
         v2_on_kept(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n, keep, L, U, sol, sub);
     }
     int nclip = 0;
-    for (int j = 0; j < n; j++) { keep_out[j] = keep[j]; nclip += !keep[j]; }
+    for (int j = 0; j < n; j++) nclip += !keep[j];
+    if (nclip > max_clipped) {
+        /* more epochs would be clipped than allowed: return the plain fit to all epochs instead */
+        for (int j = 0; j < n; j++) keep[j] = 1;
+        run_astfit_periodogram_multistart_v2(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, sol, n, 0);
+        nclip = 0;
+    }
+    for (int j = 0; j < n; j++) keep_out[j] = keep[j];
     results[0] = sol[0]; results[1] = sol[1]; results[2] = sol[2]; results[3] = sol[3]; results[4] = nclip;
     free(keep); free(trial); free(z); free(work); free(sub);
 }

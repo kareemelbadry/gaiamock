@@ -240,10 +240,22 @@ def test_clip_removes_outliers():
     data = [np.array(a) for a in synthetic_epoch_astrometry(np.random.default_rng(11), c_funcs, period=300.0, ecc=0.3, a0_mas=0.5)]
     bad = [5, 30, 31, 60]
     data[3][bad] += np.array([1.5, -2.0, 1.0, -1.2])    # 20-40 sigma
-    res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', return_mask=True)
+    res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', max_clipped=4, return_mask=True)
     np.testing.assert_array_equal(np.flatnonzero(~keep), bad)
     good = [a[keep] for a in data]
     np.testing.assert_allclose(res, gaiamock.fit_orbital_solution_nonlinear(*good, c_funcs), rtol=1e-10)
+
+
+def test_clip_cap():
+    '''with more outliers than max_clipped, the plain fit to all epochs is returned'''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = [np.array(a) for a in synthetic_epoch_astrometry(np.random.default_rng(11), c_funcs, period=300.0, ecc=0.3, a0_mas=0.5)]
+    data[3][[5, 30, 31, 60]] += np.array([1.5, -2.0, 1.0, -1.2])
+    res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', max_clipped=3, return_mask=True)
+    assert keep.all()
+    np.testing.assert_allclose(res, gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs), rtol=1e-12)
+    res, keep = gaiamock.fit_orbital_solution_nonlinear(*data, c_funcs, reject_outlier='clip', max_clipped=4, return_mask=True)
+    assert (~keep).sum() == 4
 
 
 def test_clip_restores_good_epochs():
