@@ -1103,9 +1103,6 @@ typedef struct {
     double *res;    /* n scratch: residual */
     double tspan;   /* time baseline in days */
     double *t, *psi, *pf, *y, *err;
-    double *kwbuf;  /* 4*n: previous Kepler solution per epoch (M, E - M, cos E, sin E), for warm starts */
-    double kw_e;    /* eccentricity of that solution */
-    int kw_valid;
 } AstfitWorkspace;
 
 static double ws_dot(const double* x, const double* y, int n) {
@@ -1157,8 +1154,7 @@ static double ws_orth(double* v, const double* Q, int nq, int n) {
 static void ws_build(AstfitWorkspace* w, double* t, double* psi, double* pf, double* y, double* err, int n, int reject, int skip) {
     w->n = n; w->reject = reject;
     w->t = t; w->psi = psi; w->pf = pf; w->y = y; w->err = err;
-    double* buf = (double*)malloc(sizeof(double) * (long)n * 19);
-    w->kwbuf = buf + 15 * n; w->kw_e = 0.0; w->kw_valid = 0;
+    double* buf = (double*)malloc(sizeof(double) * (long)n * 15);
     w->a = buf; w->sw = buf + n; w->cw = buf + 2 * n; w->Q = buf + 3 * n;
     w->r0 = buf + 8 * n; w->h0 = buf + 9 * n; w->Qo = buf + 10 * n; w->res = buf + 14 * n;
     double tmin = t[0], tmax = t[0];
@@ -1199,10 +1195,7 @@ static void ws_build(AstfitWorkspace* w, double* t, double* psi, double* pf, dou
     }
 }
 
-static void ktab_init(void);
-
 static AstfitWorkspace* astfit_workspace_create(double* t, double* psi, double* pf, double* y, double* err, int n, int reject) {
-    ktab_init();
     AstfitWorkspace* w = (AstfitWorkspace*)malloc(sizeof(AstfitWorkspace));
     ws_build(w, t, psi, pf, y, err, n, reject, -1);
     return w;
@@ -1272,17 +1265,12 @@ static double ws_chi2_all(AstfitWorkspace* w, double P, double phi_p, double ecc
     return ws_dot(w->res, w->res, n);
 }
 
-/* ------------- faster chi2 evaluation: Kepler starters and a 4x4 Schur-complement solve -------------
+/* ------------- faster chi2 evaluation: trig-free Kepler solver and a 4x4 Schur-complement solve -------------
 
    astfit_workspace_chi2() first tries ws_chi2_schur(), which gives the same chi2 as ws_chi2_all()
-   (to ~1e-13 relative without outlier rejection, ~1e-10 with it) but is about twice as fast:
-   1. The Kepler equation is solved with the same third-order iteration and stopping rule as
-      kepler_cos_sin() (plus a check against false convergence from a poor start), but from a
-      better starting point, so most epochs need one sin/cos pair instead of three:
-      - for the eccentricities of the v2 eccentric grid, a cubic Hermite interpolant of E(M),
-        tabulated once per process;
-      - otherwise, if (M, e) moved little since the previous chi2 call on this workspace (as
-        between Nelder-Mead steps), the previous E plus a first-order correction.
+   (to ~1e-13 relative without outlier rejection, ~1e-10 with it) but is several times faster:
+   1. cos E and sin E come from orvara's trig-free Kepler solver (kepler_cos_sin_orvara below), with
+      its starter table built once per chi2 call (one eccentricity).
    2. The 4 orbital columns are not orthogonalized one by one. A single pass over the epochs
       accumulates their overlaps with the orthonormal fixed columns, their Gram matrix and their
       overlap with the projected data. The 4x4 Schur complement is solved by Cholesky, and a
@@ -1291,95 +1279,90 @@ static double ws_chi2_all(AstfitWorkspace* w, double P, double phi_p, double ecc
    than 1e-2 of its norm after projecting out the fixed and preceding orbital columns (where the
    normal equations lose accuracy; mostly at the longest periods), or if the rejected epoch
    has leverage ~1. */
-#define KTAB_N 4096
-#define KTAB_NE 5
-static const double ktab_e[KTAB_NE] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* must match the v2 eccentric grid */
-static double ktab_E[KTAB_NE][KTAB_N + 1], ktab_dEdM[KTAB_NE][KTAB_N + 1];
-static int ktab_claimed = 0, ktab_ready = 0;
+/* Trig-free Kepler solver from orvara (Brandt et al. 2021, AJ 162, 186, Sec. 3.1, orvara/calcEA.h), which
+   follows Raposo-Pulido & Pelaez (2017, MNRAS 467, 1702); ported via the JAX version in harv
+   (harv/kepler/_kepler_solver.py). orvara is BSD-3 licensed; see THIRD_PARTY_NOTICES.
+   1. reduce M to [0, pi];
+   2. start from a piecewise quintic in M (12 pieces, matching E, E' and E'' at E = k pi/12; built once per
+      eccentricity by kepler_orvara_table), or, where 2M + 1 - e <= 0.2, from RPP's series in sqrt(1 - e);
+   3. sin E and cos E from a 15th-order Taylor series on an argument in [0, pi/4] plus a square root;
+   4. one third-order (Householder) step, and (sin E, cos E) rotated by it to third order.
+   No trig calls per epoch; |cos E|, |sin E| errors <~ 1e-14 for e <= 0.99 (5e-14 at e = 0.99). */
+#define KEPLER_ORVARA_PI 3.14159265358979323846
+typedef struct { double e, bounds[13], c[12][6]; } KeplerOrvaraTable;
 
-/* Fill the tables once. Callers that find them not yet ready simply don't use them. */
-static void ktab_init(void) {
-    if (__atomic_load_n(&ktab_ready, __ATOMIC_ACQUIRE)) return;
-    if (__atomic_exchange_n(&ktab_claimed, 1, __ATOMIC_ACQ_REL)) return;
-    for (int ie = 0; ie < KTAB_NE; ie++) {
-        double e = ktab_e[ie];
-        for (int i = 0; i <= KTAB_N; i++) {
-            double M = 2 * PI * i / KTAB_N, E = KeplerStart3(e, M);
-            for (int it = 0; it < 100; it++) {
-                double d = (E - e * sin(E) - M) / (1 - e * cos(E));
-                E -= d;
-                if (fabs(d) < 1e-15) break;
-            }
-            ktab_E[ie][i] = E;
-            ktab_dEdM[ie][i] = 1.0 / (1 - e * cos(E));
-        }
+static void kepler_orvara_table(KeplerOrvaraTable* T, double e) {
+    double En[13], s[13], co[13], d1[13], d2[13];
+    T->e = e;
+    for (int k = 0; k < 13; k++) {
+        En[k] = k * KEPLER_ORVARA_PI / 12; s[k] = sin(En[k]); co[k] = cos(En[k]);
+        T->bounds[k] = En[k] - e * s[k];
+        d1[k] = 1 / (1 - e * co[k]);                       /* dE/dM */
+        d2[k] = -0.5 * e * s[k] * d1[k] * d1[k] * d1[k];    /* (d^2E/dM^2) / 2 */
     }
-    __atomic_store_n(&ktab_ready, 1, __ATOMIC_RELEASE);
-}
-
-static inline int ktab_index(double ecc) {
-    if (!__atomic_load_n(&ktab_ready, __ATOMIC_ACQUIRE)) return -1;
-    for (int i = 0; i < KTAB_NE; i++) if (ecc == ktab_e[i]) return i;
-    return -1;
-}
-
-/* starting guess for E at M in [0, 2 pi) */
-static inline double ktab_start(int ie, double M) {
-    double u = M * (KTAB_N / (2 * PI));
-    int i = (int)u;
-    if (i >= KTAB_N) i = KTAB_N - 1;
-    double t = u - i, h = 2 * PI / KTAB_N, t2 = t * t, t3 = t2 * t;
-    return (2 * t3 - 3 * t2 + 1) * ktab_E[ie][i] + (t3 - 2 * t2 + t) * h * ktab_dEdM[ie][i]
-         + (-2 * t3 + 3 * t2) * ktab_E[ie][i + 1] + (t3 - t2) * h * ktab_dEdM[ie][i + 1];
-}
-
-/* The iteration of kepler_cos_sin() from the starting point E. Returns the converged E (and its
-   cos, sin), or NAN if not converged within max_it iterations. Far from the root the third-order
-   denominator can blow up and make the correction d small without convergence, so the Newton step
-   must be small too. */
-static inline double kepler_iter(double M, double ecc, double E, int max_it, double* cE, double* sE) {
-    for (int it = 0; it < max_it; it++) {
-        double c = cos(E), s = sin(E);
-        double t2 = -1 + ecc * c, t4 = ecc * s, t5 = -E + t4 + M;
-        double t6 = t5 / (0.5 * t5 * t4 / t2 + t2);
-        double d = t5 / ((0.5 * s - (1.0 / 6.0) * c * t6) * ecc * t6 + t2);
-        if (fabs(d) < 1e-4 && fabs(t5) < 1e-4 * fabs(t2)) {
-            double d2 = d * d;
-            double cd = 1.0 - d2 * (0.5 - d2 / 24.0), sd = d * (1.0 - d2 * (1.0 / 6.0 - d2 / 120.0));
-            *cE = c * cd + s * sd;
-            *sE = s * cd - c * sd;
-            return E - d;
-        }
-        E -= d;
+    for (int k = 0; k < 12; k++) {
+        double idx = 1 / (T->bounds[k + 1] - T->bounds[k]);
+        double a1 = d1[k], a2 = d2[k];
+        double b0 = idx * (-a2 - idx * (a1 - idx * KEPLER_ORVARA_PI / 12));
+        double b1 = idx * (-2 * a2 - idx * (a1 - d1[k + 1]));
+        double b2 = idx * (d2[k + 1] - a2);
+        T->c[k][0] = En[k]; T->c[k][1] = a1; T->c[k][2] = a2;
+        T->c[k][3] = b2 - 4 * b1 + 10 * b0;
+        T->c[k][4] = (-2 * b2 + 7 * b1 - 15 * b0) * idx;
+        T->c[k][5] = (b2 - 3 * b1 + 6 * b0) * idx * idx;
     }
-    return NAN;
 }
 
-/* Solve for epoch j, with a table starter (itab >= 0), a warm start from the previous call
-   (w->kw_valid; de = change in e since then), or KeplerStart3. Stores the solution for the next call. */
-static inline void kepler_cos_sin_ws(AstfitWorkspace* w, int j, double Mi, double ecc, int itab, double de, double* cE, double* sE) {
-    double M = Mi - (2 * PI) * floor(Mi * (1.0 / (2 * PI)));
-    if (M < 0.0) M += 2 * PI;
-    if (M >= 2 * PI) M -= 2 * PI;
-    double *wM = w->kwbuf, *wD = wM + w->n, *wc = wD + w->n, *ws = wc + w->n;
-    double E = NAN;
-    if (ecc == 0.0) { *cE = cos(M); *sE = sin(M); E = M; }
+/* RPP (2017) Eq. 19: series start for E when e -> 1 and M -> 0 */
+static inline double kepler_orvara_corner(double M, double e) {
+    double ome = 1 - e, sq = sqrt(ome), chi = M / (sq * ome);
+    double lam = sqrt(8 + 9 * chi * chi), s = cbrt(lam + 3 * chi), s2 = s * s;
+    double sigma = 6 * chi / (2 + s2 + 4 / s2), sig2 = sigma * sigma, den = sig2 + 2;
+    double poly = sig2 * (sig2 * (sig2 + 25) + 340) + 840;
+    double series = (sig2 + 20) / (60 * den) + sig2 * ome * poly / (1400 * den * den * den);
+    return sigma * (1 + sig2 * ome * series) * sq;
+}
+
+/* 15th-order Taylor series for sin x; float64-accurate for |x| <= pi/4 */
+static inline double kepler_orvara_short_sin(double x) {
+    double x2 = x * x;
+    double p = 1.0 / 6227020800.0 - x2 * (1.0 / 1307674368000.0);
+    p = 1.0 / 39916800.0 - x2 * p;
+    p = 1.0 / 362880.0 - x2 * p;
+    p = 1.0 / 5040.0 - x2 * p;
+    p = 1.0 / 120.0 - x2 * p;
+    p = 1.0 / 6.0 - x2 * p;
+    return x * (1 - x2 * p);
+}
+
+/* cos E, sin E for mean anomaly Mi (any value), eccentricity T->e */
+static inline void kepler_cos_sin_orvara(const KeplerOrvaraTable* T, double Mi, double* cE, double* sE) {
+    const double pi = KEPLER_ORVARA_PI, e = T->e;
+    double M = Mi - 2 * pi * floor(Mi * (1.0 / (2 * pi)));
+    int lower = M > pi;
+    if (lower) M = 2 * pi - M;
+    double E;
+    if (2 * M + (1 - e) <= 0.2) E = kepler_orvara_corner(M, e);
     else {
-        if (itab >= 0) E = kepler_iter(M, ecc, ktab_start(itab, M), 8, cE, sE);
-        else if (w->kw_valid) {
-            double dM = M - wM[j];
-            if (dM > PI) dM -= 2 * PI; else if (dM < -PI) dM += 2 * PI;
-            if (fabs(dM) < 0.3) {
-                /* E - M at the new (M, e), to first order */
-                double Eg = M + wD[j] + (dM * ecc * wc[j] + de * ws[j]) / (1 - ecc * wc[j]);
-                if (Eg > M + ecc) Eg = M + ecc; else if (Eg < M - ecc) Eg = M - ecc;
-                E = kepler_iter(M, ecc, Eg, 8, cE, sE);
-            }
-        }
-        if (!(E == E)) E = kepler_iter(M, ecc, KeplerStart3(ecc, M), 100, cE, sE);
-        if (!(E == E)) { kepler_cos_sin(Mi, ecc, cE, sE); E = atan2(*sE, *cE); }
+        int k = 0;
+        while (k < 11 && T->bounds[k + 1] < M) k++;
+        const double* a = T->c[k];
+        double x = M - T->bounds[k];
+        E = a[0] + x * (a[1] + x * (a[2] + x * (a[3] + x * (a[4] + x * a[5]))));
     }
-    wM[j] = M; wD[j] = E - M; wc[j] = *cE; ws[j] = *sE;
+    int near0 = E <= pi / 4, nearpi = E >= 3 * pi / 4;
+    double s = kepler_orvara_short_sin(near0 ? E : (nearpi ? pi - E : pi / 2 - E));
+    double c = sqrt(fmax(1 - s * s, 0.0));
+    double sinE = (near0 || nearpi) ? s : c;
+    double cosE = near0 ? c : (nearpi ? -c : s);
+    /* one Householder step on f(E) = E - e sin E - M */
+    double num = M - E + e * sinE, den = 1 - e * cosE, es = e * sinE, ec = e * cosE;
+    double dE = num * (den * den + 0.5 * num * es) / (den * den * den + num * (den * es + num * ec / 6));
+    /* rotate (sin E, cos E) by dE, to third order in dE */
+    double q = dE * dE / 6, cd = 1 - 3 * q, sd = dE * (1 - q);
+    double s2 = sinE * cd + cosE * sd, c2 = cosE * cd - sinE * sd;
+    *sE = lower ? -s2 : s2;
+    *cE = c2;
 }
 
 static int ws_chi2_schur(AstfitWorkspace* w, double P, double phi_p, double ecc, double* chi2_out) {
@@ -1387,12 +1370,12 @@ static int ws_chi2_schur(AstfitWorkspace* w, double P, double phi_p, double ecc,
     double sq = sqrt(1 - ecc * ecc);
     double* B = w->Qo;
     double G[5][4] = {{0}}, H[4][4] = {{0}}, b[4] = {0};
-    int itab = ktab_index(ecc);
-    double de = ecc - w->kw_e;
-    if (fabs(de) > 0.05) w->kw_valid = 0;
+    KeplerOrvaraTable kt;
+    if (ecc > 0.0) kepler_orvara_table(&kt, ecc);
     for (int j = 0; j < n; j++) {
-        double cE, sE;
-        kepler_cos_sin_ws(w, j, w->a[j] / P - phi_p, ecc, itab, de, &cE, &sE);
+        double cE, sE, M = w->a[j] / P - phi_p;
+        if (ecc > 0.0) kepler_cos_sin_orvara(&kt, M, &cE, &sE);
+        else { cE = cos(M); sE = sin(M); }
         double X = cE - ecc, Y = sq * sE;
         double v0 = X * w->sw[j], v1 = Y * w->sw[j], v2 = X * w->cw[j], v3 = Y * w->cw[j];
         B[j] = v0; B[n + j] = v1; B[2 * n + j] = v2; B[3 * n + j] = v3;
@@ -1406,8 +1389,6 @@ static int ws_chi2_schur(AstfitWorkspace* w, double P, double phi_p, double ecc,
         double r = w->r0[j];
         b[0] += v0 * r; b[1] += v1 * r; b[2] += v2 * r; b[3] += v3 * r;
     }
-    w->kw_e = ecc;
-    w->kw_valid = 1;
     /* Cholesky of S = H - G^T G */
     double Lc[4][4];
     for (int c = 0; c < 4; c++) {
@@ -1501,7 +1482,7 @@ double get_chi2_astrometry_fast(int n_obs, double *t_ast_yr, double *psi, double
 }
 
 /* chi2 at n_eval points (P[i], phi_p[i], ecc[i]) evaluated in order on one workspace, as the
-   optimizers do (so later points can warm-start the Kepler solve from earlier ones). Exposed for testing. */
+   optimizers do. Exposed for testing. */
 void get_chi2_astrometry_fast_sequence(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, int n_eval, double *P, double *phi_p, double *ecc, int reject_outlier, double *chi2_out) {
     AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, reject_outlier);
     for (int i = 0; i < n_eval; i++) chi2_out[i] = astfit_workspace_chi2(w, P[i], phi_p[i], ecc[i]);
@@ -2047,7 +2028,7 @@ static void astfit_v2_search(double* t_ast_yr, double* psi, double *plx_factor, 
     }
 
     /* 3. eccentric grid at each seed period -> best (phi_p, e) per seed */
-    double ecc_grid[5] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* ktab_e and grid_e tabulate E(M) at these */
+    double ecc_grid[5] = {0.2, 0.4, 0.6, 0.8, 0.95};   /* grid_e tabulates X, Y at these */
     AstfitSeed* ecc_seeds = (AstfitSeed*)malloc(sizeof(AstfitSeed) * (n_seeds > 0 ? n_seeds : 1));
     GridWorkspace* gw = approx_grid ? grid_workspace_create(w) : NULL;
     for (int s = 0; s < n_seeds; s++) {

@@ -127,8 +127,8 @@ def fast_chi2_sequence(c_funcs, data, P, phi_p, ecc, reject_outlier):
 @pytest.mark.parametrize('reject_outlier', [False, True])
 def test_fast_chi2_sequence_matches_gsl(reject_outlier):
     '''
-    Inside the optimizers, consecutive chi2 calls on one workspace warm-start the Kepler solve from the previous call,
-    and the eccentricities of the v2 grid use a tabulated starter. Neither should change chi2.
+    Consecutive chi2 calls on one workspace, as inside the optimizers (with the trig-free Kepler solver, at the v2
+    grid eccentricities, at e = 0 and over a long high-eccentricity walk), should match fresh evaluations and GSL.
     '''
     rng = np.random.default_rng(0)
     c_funcs = gaiamock.read_in_C_functions()
