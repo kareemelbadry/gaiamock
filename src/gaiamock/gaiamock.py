@@ -137,7 +137,7 @@ def get_astrometric_residuals_12par_campbell(t_ast_yr, psi, plx_factor, ast_obs,
 
 def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, 
     L = np.array([10, 0, 0]), U = np.array([1e4, 2*np.pi, 0.99]), reject_outlier=False,
-    optimizer="periodogram_multistart_v2", clip_sigma=4.5, max_clipped=2, return_mask=False):
+    optimizer="periodogram_multistart_v2", clip_sigma=6.0, max_clipped=2, return_mask=False):
     '''
     Fit the nonlinear orbital parameters (P, phi_p, e) for epoch astrometry.
 
@@ -181,7 +181,7 @@ def fit_orbital_solution_nonlinear(t_ast_yr, psi, plx_factor, ast_obs, ast_err, 
         likelihood call, the largest-residual epoch is ignored. This is a
         different objective from the full chi2, not just post-fit clipping.
         "clip" (periodogram_multistart_v2 only): fit all epochs, then clip
-        epochs whose whitened residual exceeds clip_sigma times
+        epochs whose whitened residual exceeds clip_sigma (default 6) times
         max(1, 1.4826 * median absolute residual of the kept epochs), and
         search again on the kept epochs; repeated up to 4 times, and a
         clipped epoch returns if it fits a later orbit. At most max_clipped
@@ -1156,7 +1156,7 @@ def fit_5par_solution_only(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned =
     return [mu[0], mu[1], mu[2], mu[3], mu[4], sigma_mu[0], sigma_mu[1], sigma_mu[2], sigma_mu[3], sigma_mu[4], ruwe, sigma5d_max]
         
 
-def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="periodogram_multistart_v2", clip_sigma=4.5, max_clipped=2, return_mask=False):
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="periodogram_multistart_v2", clip_sigma=6.0, max_clipped=2, return_mask=False):
     '''
     Fit 1D epoch astrometry with the astrometric cascade.
 
