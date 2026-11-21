@@ -4,8 +4,12 @@ Compiles src/gaiamock/kepler_solve_astrometry.c into the shared library that gai
 The package metadata lives in pyproject.toml; this file only exists to build the C code, which needs GSL.
 GSL is located using (in order) the GSL_DIR or GSL_ROOT environment variables, gsl-config, pkg-config, and
 then a few common install locations (the active conda environment, Homebrew, /usr/local, /usr).
+
+Extra compiler flags can be passed with the GAIAMOCK_CFLAGS environment variable when building from source, e.g.
+GAIAMOCK_CFLAGS="-O3 -march=x86-64-v3" (see "Faster builds" in the README).
 '''
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -69,6 +73,8 @@ class build_ctypes_library(build_ext):
         self.compiler.linker_so[1:1] = [f'-L{d}' for d in library_dirs]
         for ext in self.extensions:
             ext.include_dirs += include_dirs
+            # optional user flags go last so they override the defaults (e.g. -O3 after Python's own -O2)
+            ext.extra_compile_args += shlex.split(os.environ.get('GAIAMOCK_CFLAGS', ''))
             # record where GSL is so the library loads without needing LD_LIBRARY_PATH or `module load gsl`
             ext.extra_link_args += [f'-Wl,-rpath,{d}' for d in library_dirs]
         super().build_extensions()
