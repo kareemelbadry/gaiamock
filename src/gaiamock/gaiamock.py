@@ -479,6 +479,38 @@ def predict_F2_unbinned_data(chi2_red_binned, n_param, N_points, Nbin=8):
     nu_unbinned = N_points*Nbin - n_param # unbinned
     return np.sqrt(9*nu_unbinned/2)*(chi2_red_unbinned**(1/3) + 2/(9*nu_unbinned) -1  )
 
+def use_transit_level_statistics(nss_statistics, binned):
+    '''
+    Check the nss_statistics option of the non-single-star fits (acceleration and orbital solutions) and return
+    True if their goodness of fit and uncertainties should be the transit-level ones.
+
+    nss_statistics = "ccd" (default): the statistics of a fit to the individual CCD observations, as in Gaia DR3.
+        With binned data (one measurement per FOV transit, averaging the ~8 CCDs), the reduced chi2 is converted
+        to its CCD-level value with predict_reduced_chi2_unbinned_data(). Binning dilutes any excess scatter, so a
+        binned reduced chi2 of 3 corresponds to about 1.25 at the CCD level. F2 and the factor that inflates the
+        uncertainties are calculated from that value.
+    nss_statistics = "transit": the statistics of the fit to the transit-level data themselves. F2 is calculated
+        from the binned chi2 with N_transits - n_param degrees of freedom, and the uncertainties are inflated by
+        sqrt(reduced chi2) of the binned fit when that is above 1, and left as they are otherwise. This needs
+        binned = True.
+
+    ruwe and the 5-parameter solution are not affected by this option.
+    '''
+    if nss_statistics not in ('ccd', 'transit'):
+        raise ValueError('nss_statistics must be "ccd" or "transit".')
+    if nss_statistics == 'transit' and not binned:
+        raise ValueError('nss_statistics="transit" needs binned=True (one measurement per FOV transit).')
+    return nss_statistics == 'transit'
+
+def transit_level_F2_and_error_inflation(chi2_red_binned, nu):
+    '''
+    F2 and the uncertainty inflation factor for nss_statistics = "transit" (see use_transit_level_statistics()).
+    chi2_red_binned: reduced chi2 of the fit to the binned data; nu: its degrees of freedom.
+    '''
+    F2 = np.sqrt(9*nu/2)*(chi2_red_binned**(1/3) + 2/(9*nu) - 1)
+    cc = max(1.0, np.sqrt(chi2_red_binned/((1 - 2/(9*nu))**3)))
+    return F2, cc
+
 def check_ruwe(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
     '''
     This function takes a set of astrometric data (t_ast_yr, psi, plx_factor, ast_obs, ast_err) and fits a 5-parameter solution. It inflates the uncertainties according to the goodness of fit and returns the 5-parameter UWE, best-fit parameters, and uncertainties. 
@@ -546,13 +578,14 @@ def get_5par_solution_and_sigma_5d_max(t_ast_yr, psi, plx_factor, ast_obs, ast_e
     return ruwe, mu, sigma_mu, sigma5d_max
 
 
-def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
+def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True, nss_statistics = 'ccd'):
     '''
     Fit a 7-parameter acceleration model to epoch astrometry.
 
     The fitted parameters are (ra_off, pmra, pmra_dot, dec_off, pmdec,
     pmdec_dot, parallax). Uncertainties are inflated according to the goodness
-    of fit, with the binned/unbinned correction controlled by binned.
+    of fit, with the binned/unbinned correction controlled by binned and
+    nss_statistics (see use_transit_level_statistics()).
 
     Returns
     -------
@@ -571,7 +604,9 @@ def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
     
     chi2_red_binned = np.sum(resids**2/ast_err**2)/nu
     chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 7, N_points = Nobs, Nbin=8)
-    if binned:
+    if use_transit_level_statistics(nss_statistics, binned):
+        F2, cc = transit_level_F2_and_error_inflation(chi2_red_binned, nu)
+    elif binned:
         F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 7, N_points = Nobs, Nbin=8)
         cc = np.sqrt(chi2_red_unbinned/((1-2/(9*nu_unbinned))**3 ))
     else:
@@ -587,14 +622,14 @@ def check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned = True):
     s = 1/(sig1*sig2)*np.sqrt((p1**2*sig2**2 + p2**2*sig1**2 - 2*p1*p2*rho12*sig1*sig2)/(1-rho12**2))
     return F2, s, mu, sigma_mu
  
-def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=True):
+def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=True, nss_statistics='ccd'):
     '''
     Fit a 9-parameter acceleration/jerk model to epoch astrometry.
 
     The fitted parameters are (ra_off, pmra, pmra_dot, pmra_ddot, dec_off,
     pmdec, pmdec_dot, pmdec_ddot, parallax). Uncertainties are inflated
     according to the goodness of fit, with the binned/unbinned correction
-    controlled by binned.
+    controlled by binned and nss_statistics (see use_transit_level_statistics()).
 
     Returns
     -------
@@ -614,7 +649,9 @@ def check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=True):
     chi2_red_binned = np.sum(resids**2/ast_err**2)/nu
     chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 9, N_points = Nobs, Nbin=8)
     
-    if binned:
+    if use_transit_level_statistics(nss_statistics, binned):
+        F2, cc = transit_level_F2_and_error_inflation(chi2_red_binned, nu)
+    elif binned:
         F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 9, N_points = Nobs, Nbin=8)
         cc = np.sqrt(chi2_red_unbinned/((1-2/(9*nu_unbinned))**3 ))
     else:
@@ -1034,7 +1071,7 @@ def plot_residuals_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, theta_array
     ax[1].set_ylabel('residual (7 par)', fontsize=20)
 
     
-def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, p0, c_funcs, binned=True, reject_outlier=False, parallax_priors = (None, -1), eccentricity_priors = (None, -1)):
+def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast_obs, ast_err, p0, c_funcs, binned=True, reject_outlier=False, parallax_priors = (None, -1), eccentricity_priors = (None, -1), nss_statistics='ccd'):
     '''
     This function calculates the Hessian matrix, approximated from the Jacobian, at a coordinate in 12-dimensional parameter space p0. 
     p0 = (ra_offset, dec_offset, parallax, pmra, pmdec, period, ecc, phi_p, A, B, F, G)
@@ -1048,6 +1085,9 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
     
     if parallax_priors[0] is not None, this will add a Gaussian prior parallax = parallax_priors[0] +/- parallax_priors[1]
     if eccentricity_priors[0] is not None, this will add a prior ecc = beta(eccentricity_priors[0], eccentricity_priors[1]). 
+
+    The uncertainties are inflated according to the goodness of fit. binned and nss_statistics ("ccd" or "transit") set
+    how; see use_transit_level_statistics().
 
     '''
     
@@ -1101,7 +1141,9 @@ def get_uncertainties_at_best_fit_binary_solution(t_ast_yr, psi, plx_factor, ast
             nu, Nobs, nu_unbinned = len(ast_obs) - 12, len(ast_obs), len(ast_obs)*8 - 12  
         chi2_red_binned = np.sum(resid_func(p0)**2)/nu
         chi2_red_unbinned = predict_reduced_chi2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
-        if binned:
+        if use_transit_level_statistics(nss_statistics, binned):
+            cc = transit_level_F2_and_error_inflation(chi2_red_binned, nu)[1]
+        elif binned:
             cc = np.sqrt(chi2_red_unbinned/((1 - 2/(9*nu_unbinned))**3 ))
         else:
             cc = np.sqrt(chi2_red_binned/((1 - 2/(9*nu))**3 ))
@@ -1156,7 +1198,7 @@ def fit_5par_solution_only(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned =
     return [mu[0], mu[1], mu[2], mu[3], mu[4], sigma_mu[0], sigma_mu[1], sigma_mu[2], sigma_mu[3], sigma_mu[4], ruwe, sigma5d_max]
         
 
-def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="periodogram_multistart_v2", clip_sigma=6.0, max_clipped=2, return_mask=False):
+def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, verbose=False, show_residuals=False, binned = True, ruwe_min = 1.4, skip_acceleration=False, reject_outlier=False, P_min = 10, optimizer="periodogram_multistart_v2", clip_sigma=6.0, max_clipped=2, return_mask=False, nss_statistics='ccd'):
     '''
     Fit 1D epoch astrometry with the astrometric cascade.
 
@@ -1184,6 +1226,12 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     kept epochs. The 5-parameter and acceleration checks use all epochs. If
     return_mask is True, returns (result, keep), where keep is a boolean array
     marking the epochs used in the orbital solution (all True if there is none).
+
+    nss_statistics sets how F2 and the uncertainties of the acceleration and
+    orbital solutions are calculated from binned data: "ccd" (default) converts
+    them to what a fit to the individual CCD observations would give, as in
+    Gaia DR3; "transit" uses the transit-level fit itself. See
+    use_transit_level_statistics(). ruwe is not affected.
 
     Returns
     -------
@@ -1223,7 +1271,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         c_funcs = read_in_C_functions()
     
     # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
-    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=binned)
+    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=binned, nss_statistics=nss_statistics)
     plx_over_err9 = mu[-1]/sigma_mu[-1]
     if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05) and (not skip_acceleration):
         res =  Nret*[-9]  # set most return arguments to -9, but save a few parameters for convenience 
@@ -1244,7 +1292,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         return (res, np.ones(len(t_ast_yr), dtype=bool)) if return_mask else res
     
     # mu is ra, pmra, pmra_dot, dec, pmdec, pmdec_dot, plx
-    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=binned)
+    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, binned=binned, nss_statistics=nss_statistics)
     plx_over_err7 = mu[-1]/sigma_mu[-1]
     if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05) and (not skip_acceleration):
         res =  Nret*[-7]
@@ -1277,7 +1325,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     p0 = [ra_off, dec_off, plx, pmra, pmdec, period, ecc, phi_p, A, B, F, G]
     
     # get some uncertainties 
-    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=binned, reject_outlier=reject_outlier)
+    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=binned, reject_outlier=reject_outlier, nss_statistics=nss_statistics)
     sig_ra,sig_dec,sig_parallax,sig_pmra,sig_pmdec,sig_period,sig_ecc,sig_phi_p,sig_A,sig_B, sig_F,sig_G = errors
     
     if reject_outlier:
@@ -1286,7 +1334,9 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
         Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
     chi2_red_binned = chi2/nu
     
-    if binned:
+    if use_transit_level_statistics(nss_statistics, binned):
+        F2 = transit_level_F2_and_error_inflation(chi2_red_binned, nu)[0]
+    elif binned:
         F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
     else:
         F2 = np.sqrt(9*nu/2)*(chi2_red_binned**(1/3) + 2/(9*nu) - 1)
@@ -1320,7 +1370,7 @@ def fit_full_astrometric_cascade(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_
     return (return_array, keep) if return_mask else return_array
 
 
-def fit_full_astrometric_cascade_with_parallax_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, ruwe_min = 1.25, skip_acceleration=True, P_min = 100, parallax_priors = (0.1, 0.01)):
+def fit_full_astrometric_cascade_with_parallax_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, ruwe_min = 1.25, skip_acceleration=True, P_min = 100, parallax_priors = (0.1, 0.01), nss_statistics='ccd'):
     '''
     Fit the astrometric cascade with a Gaussian parallax prior in the orbital fit.
 
@@ -1351,7 +1401,7 @@ def fit_full_astrometric_cascade_with_parallax_prior(t_ast_yr, psi, plx_factor, 
         c_funcs = read_in_C_functions()
     
     # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
-    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, nss_statistics=nss_statistics)
     plx_over_err9 = mu[-1]/sigma_mu[-1]
     if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05) and (not skip_acceleration):
         res =  Nret*[-9]  # set most return arguments to -9, but save a few parameters for convenience 
@@ -1366,7 +1416,7 @@ def fit_full_astrometric_cascade_with_parallax_prior(t_ast_yr, psi, plx_factor, 
         return res
     
     # mu is ra, pmra, pmra_dot, dec, pmdec, pmdec_dot, plx
-    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, nss_statistics=nss_statistics)
     plx_over_err7 = mu[-1]/sigma_mu[-1]
     if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05) and (not skip_acceleration):
         res =  Nret*[-7]
@@ -1387,13 +1437,16 @@ def fit_full_astrometric_cascade_with_parallax_prior(t_ast_yr, psi, plx_factor, 
     p0 = [ra_off, dec_off, plx, pmra, pmdec, period, ecc, phi_p, A, B, F, G]
     
     # get some uncertainties 
-    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=True, reject_outlier=False, parallax_priors = parallax_priors)
+    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=True, reject_outlier=False, parallax_priors = parallax_priors, nss_statistics=nss_statistics)
     sig_ra,sig_dec,sig_parallax,sig_pmra,sig_pmdec,sig_period,sig_ecc,sig_phi_p,sig_A,sig_B, sig_F,sig_G = errors
     
     Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
     chi2_red_binned = chi2/nu
     
-    F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
+    if use_transit_level_statistics(nss_statistics, True):
+        F2 = transit_level_F2_and_error_inflation(chi2_red_binned, nu)[0]
+    else:
+        F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
     a0_over_err, parallax_over_error = a0_mas/sigma_a0_mas, plx/sig_parallax
         
     # lots of stuff that can be useful to return
@@ -1401,7 +1454,7 @@ def fit_full_astrometric_cascade_with_parallax_prior(t_ast_yr, psi, plx_factor, 
     return return_array
 
 
-def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, ruwe_min = 1.25, skip_acceleration=True, P_min = 10, eccentricity_priors = (1.0, 3.0)):
+def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_factor, ast_obs, ast_err, c_funcs, ruwe_min = 1.25, skip_acceleration=True, P_min = 10, eccentricity_priors = (1.0, 3.0), nss_statistics='ccd'):
     '''
     Fit the astrometric cascade with a beta prior on eccentricity.
 
@@ -1432,7 +1485,7 @@ def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_fact
         c_funcs = read_in_C_functions()
     
     # mu is  ra, pmra, pmra_dot, pmra_ddot, dec, pmdec, pmdec_dot, pmdec_ddot, plx
-    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    F2_9par, s_9par, mu, sigma_mu = check_9par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, nss_statistics=nss_statistics)
     plx_over_err9 = mu[-1]/sigma_mu[-1]
     if (F2_9par < 25) and (s_9par > 12) and (plx_over_err9 > 2.1*s_9par**1.05) and (not skip_acceleration):
         res =  Nret*[-9]  # set most return arguments to -9, but save a few parameters for convenience 
@@ -1447,7 +1500,7 @@ def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_fact
         return res
     
     # mu is ra, pmra, pmra_dot, dec, pmdec, pmdec_dot, plx
-    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err)
+    F2_7par, s_7par, mu, sigma_mu = check_7par(t_ast_yr, psi, plx_factor, ast_obs, ast_err, nss_statistics=nss_statistics)
     plx_over_err7 = mu[-1]/sigma_mu[-1]
     if (F2_7par < 25) and (s_7par > 12) and (plx_over_err7 > 1.2*s_7par**1.05) and (not skip_acceleration):
         res =  Nret*[-7]
@@ -1468,13 +1521,16 @@ def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_fact
     p0 = [ra_off, dec_off, plx, pmra, pmdec, period, ecc, phi_p, A, B, F, G]
     
     # get some uncertainties 
-    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=True, reject_outlier=False, eccentricity_priors = eccentricity_priors)
+    errors, a0_mas, sigma_a0_mas, inc_deg = get_uncertainties_at_best_fit_binary_solution(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, p0 = p0, c_funcs = c_funcs, binned=True, reject_outlier=False, eccentricity_priors = eccentricity_priors, nss_statistics=nss_statistics)
     sig_ra,sig_dec,sig_parallax,sig_pmra,sig_pmdec,sig_period,sig_ecc,sig_phi_p,sig_A,sig_B, sig_F,sig_G = errors
     
     Nobs, nu, nu_unbinned = len(ast_obs), len(ast_obs) - 12, len(ast_obs)*8 - 12
     chi2_red_binned = chi2/nu
     
-    F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
+    if use_transit_level_statistics(nss_statistics, True):
+        F2 = transit_level_F2_and_error_inflation(chi2_red_binned, nu)[0]
+    else:
+        F2 = predict_F2_unbinned_data(chi2_red_binned = chi2_red_binned, n_param = 12, N_points = Nobs, Nbin=8)
     a0_over_err, parallax_over_error = a0_mas/sigma_a0_mas, plx/sig_parallax
         
     # lots of stuff that can be useful to return
@@ -1483,7 +1539,7 @@ def fit_full_astrometric_cascade_with_eccentricity_prior(t_ast_yr, psi, plx_fact
 
 
 
-def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False, ruwe_min = 1.4, skip_acceleration=False, binned = True):
+def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period, Tp, ecc, omega, inc_deg, w, phot_g_mean_mag, f, data_release, c_funcs, verbose=False, show_residuals=False, ruwe_min = 1.4, skip_acceleration=False, binned = True, nss_statistics = 'ccd'):
     '''
     this function generates the mock 1D astrometry for a binary and then fits it with a cascade of astrometric models.  
     ra, dec: coordinates, in degrees
@@ -1504,6 +1560,7 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
     verbose: whether to print results of fitting. 
     if show_residuals, plot the residuals of the best-fit 5-parameter solution and the best-fit orbital solution. This will only happen if an orbital solution is actually calculated (i.e., we get to that stage in the cascade.)
     binned: if True, simulate and fit one measurement per FOV transit. If False, simulate and fit the measurement from each CCD (see predict_astrometry_luminous_binary()).
+    nss_statistics: "ccd" (default) or "transit"; how F2 and the uncertainties of the acceleration and orbital solutions are calculated from binned data (see use_transit_level_statistics()).
     '''
     if c_funcs is None:
         c_funcs = read_in_C_functions()
@@ -1517,7 +1574,7 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
             print('not enough visibility periods!')
         return Nret*[0]
         
-    res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min,skip_acceleration=skip_acceleration, binned=binned ) 
+    res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min,skip_acceleration=skip_acceleration, binned=binned, nss_statistics=nss_statistics) 
     
     # potentially blended, so rerun 
     if (period > 1e4) and (res[-2] < 25) & (res[-6]/res[-5] > 5): 
@@ -1527,7 +1584,7 @@ def run_full_astrometric_cascade(ra, dec, parallax, pmra, pmdec, m1, m2, period,
             if verbose:
                 print('not enough visibility periods!')
             return Nret*[0]
-        res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned) 
+        res = fit_full_astrometric_cascade(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, c_funcs = c_funcs, verbose = verbose, show_residuals = show_residuals, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned, nss_statistics=nss_statistics) 
 
     return res
     
@@ -1647,7 +1704,7 @@ def generate_coordinates_at_a_given_distance_exponential_disk(d_min, d_max, N_st
     ra, dec, d_pc = ra[:N_stars], dec[:N_stars], d_pc[:N_stars]
     return ra, dec, d_pc, x[ok][:N_stars], y[ok][:N_stars], z[ok][:N_stars]
     
-def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True, ruwe_min=1.4, skip_acceleration = False, hz_pc = 300, binned = True):
+def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr3', do_dust = True, ruwe_min=1.4, skip_acceleration = False, hz_pc = 300, binned = True, nss_statistics = 'ccd'):
     '''
     Simulate many sky/orientation realizations of one binary population point.
 
@@ -1663,6 +1720,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     accepted is True for realizations that reached an orbital solution and
     passed the DR3 cuts.
     binned: if True, simulate and fit one measurement per FOV transit. If False, simulate and fit the measurement from each CCD (see predict_astrometry_luminous_binary()).
+    nss_statistics: "ccd" (default) or "transit"; how F2 and the uncertainties of the acceleration and orbital solutions are calculated from binned data (see use_transit_level_statistics()).
     '''
     ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = hz_pc)
     l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
@@ -1686,7 +1744,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     
     def search_mock_binary_worker(i):
         '''Generate and fit one randomized binary realization for joblib parallel execution.'''
-        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned)        
+        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned, nss_statistics=nss_statistics)
         return result
     
     from joblib import Parallel, delayed
@@ -1713,7 +1771,7 @@ def simulate_many_realizations_of_a_single_binary(d_min, d_max, period, Mg_tot, 
     return ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted
 
 
-def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr4', do_dust = True, ruwe_min=1.4, skip_acceleration = True, hz_pc = 300, a0_over_error_min = 15, parallax_over_error_min = 5, binned = True):
+def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, period, Mg_tot, f, m1, m2, ecc, N_realizations = 100, data_release='dr4', do_dust = True, ruwe_min=1.4, skip_acceleration = True, hz_pc = 300, a0_over_error_min = 15, parallax_over_error_min = 5, binned = True, nss_statistics = 'ccd'):
     '''
     Simulate many realizations and apply user-configurable orbital cuts.
 
@@ -1727,6 +1785,7 @@ def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, peri
     Returns:
         ra, dec, d_pc, phot_g_mean_mag, Tp, omega, w, fit_inc_deg, accepted.
     binned: if True, simulate and fit one measurement per FOV transit. If False, simulate and fit the measurement from each CCD (see predict_astrometry_luminous_binary()).
+    nss_statistics: "ccd" (default) or "transit"; how F2 and the uncertainties of the acceleration and orbital solutions are calculated from binned data (see use_transit_level_statistics()).
     '''
     ra, dec, d_pc, x,y,z = generate_coordinates_at_a_given_distance_exponential_disk(d_min = d_min, d_max = d_max, N_stars = N_realizations, hz_pc = hz_pc)
     l_deg, b_deg = xyz_to_galactic(x = x, y = y, z = z) 
@@ -1750,7 +1809,7 @@ def simulate_many_realizations_of_a_single_binary_looser_cuts(d_min, d_max, peri
     
     def search_mock_binary_worker(i):
         '''Generate and fit one randomized binary realization for joblib parallel execution.'''
-        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned)        
+        result = run_full_astrometric_cascade(ra = ra[i], dec = dec[i], parallax = 1000/d_pc[i], pmra = 0, pmdec = 0, m1 = m1, m2 = m2, period = period, Tp = Tp[i], ecc = ecc, omega = omega[i], inc_deg = inc_deg[i], w = w[i], phot_g_mean_mag = phot_g_mean_mag[i], f = f, data_release = data_release, c_funcs = None, verbose=False, show_residuals=False, ruwe_min=ruwe_min, skip_acceleration=skip_acceleration, binned=binned, nss_statistics=nss_statistics)
         return result
     
     from joblib import Parallel, delayed

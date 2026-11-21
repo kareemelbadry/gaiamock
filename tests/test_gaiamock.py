@@ -414,3 +414,84 @@ def test_unbinned_cascade_with_scanning_law():
         ra=150, dec=20, parallax=2, pmra=5, pmdec=-5, m1=1, m2=0.8, period=500, Tp=0, ecc=0.2, omega=1, inc_deg=30,
         w=2, phot_g_mean_mag=13, f=0.01, data_release='dr3', c_funcs=None, skip_acceleration=True, binned=False)
     assert len(res) == 23 and np.all(np.isfinite(res))
+
+
+def orbit_data_with_noise_scale(c_funcs, scale, seed=500):
+    '''
+    a clear orbit whose true scatter is `scale` times the quoted uncertainties
+    '''
+    t_ast_yr, psi, plx_factor, ast_obs, ast_err = synthetic_epoch_astrometry(np.random.default_rng(seed), c_funcs, period=300.0, ecc=0.3,
+                                                                              a0_mas=3.0, ast_err=0.05 * scale)
+    return t_ast_yr, psi, plx_factor, ast_obs, ast_err / scale
+
+
+@pytest.mark.parametrize('scale', [0.7, 1.0, 1.6])
+def test_nss_statistics_ccd_is_the_default_and_unchanged(scale):
+    '''
+    nss_statistics="ccd" is the default: F2 and the uncertainty inflation of the orbital solution come from the
+    reduced chi2 converted to the CCD level, as before the option was added
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = orbit_data_with_noise_scale(c_funcs, scale)
+    default = gaiamock.fit_full_astrometric_cascade(*data, c_funcs, skip_acceleration=True)
+    ccd = gaiamock.fit_full_astrometric_cascade(*data, c_funcs, skip_acceleration=True, nss_statistics='ccd')
+    assert default == ccd
+
+    n = len(data[0])
+    chi2 = gaiamock.get_astrometric_chi2(*data, default[10], default[12], default[14], c_funcs)[0]
+    assert default[21] == pytest.approx(gaiamock.predict_F2_unbinned_data(chi2_red_binned=chi2 / (n - 12), n_param=12, N_points=n, Nbin=8))
+
+
+@pytest.mark.parametrize('scale', [0.7, 1.0, 1.6])
+def test_nss_statistics_transit(scale):
+    '''
+    nss_statistics="transit": F2 is that of the fit to the binned data, and the uncertainties are inflated by
+    sqrt(reduced chi2) of that fit when it is above 1 and not changed when it is below
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    data = orbit_data_with_noise_scale(c_funcs, scale)
+    ccd = np.array(gaiamock.fit_full_astrometric_cascade(*data, c_funcs, skip_acceleration=True))
+    transit = np.array(gaiamock.fit_full_astrometric_cascade(*data, c_funcs, skip_acceleration=True, nss_statistics='transit'))
+
+    n = len(data[0]); nu = n - 12; nu_ccd = 8 * n - 12
+    chi2_red = gaiamock.get_astrometric_chi2(*data, ccd[10], ccd[12], ccd[14], c_funcs)[0] / nu
+    assert (chi2_red > 1) == (scale > 1) or scale == 1.0
+
+    # the solution, ruwe and the counts are the same; only F2 and the uncertainties differ
+    same = [0, 2, 4, 6, 8, 10, 12, 14, 16, 17, 19, 20, 22]
+    np.testing.assert_array_equal(transit[same], ccd[same])
+    assert transit[21] == pytest.approx(np.sqrt(9 * nu / 2) * (chi2_red**(1 / 3) + 2 / (9 * nu) - 1))
+
+    cc_ccd = np.sqrt(gaiamock.predict_reduced_chi2_unbinned_data(chi2_red, 12, n, 8) / (1 - 2 / (9 * nu_ccd))**3)
+    cc_transit = max(1.0, np.sqrt(chi2_red / (1 - 2 / (9 * nu))**3))
+    errors = [1, 3, 5, 7, 9, 11, 13, 15, 18]
+    np.testing.assert_allclose(transit[errors] / ccd[errors], cc_transit / cc_ccd, rtol=1e-9)
+    if scale > 1:
+        assert cc_transit / cc_ccd == pytest.approx(scale, rel=0.2)      # the full inflation, which "ccd" dilutes
+    if scale < 1:
+        assert cc_transit == 1.0
+
+
+def test_nss_statistics_acceleration_checks():
+    c_funcs = gaiamock.read_in_C_functions()
+    data = orbit_data_with_noise_scale(c_funcs, 1.0)
+    for check, n_param in [(gaiamock.check_7par, 7), (gaiamock.check_9par, 9)]:
+        F2_ccd, s_ccd, mu_ccd, sig_ccd = check(*data)
+        F2_tr, s_tr, mu_tr, sig_tr = check(*data, nss_statistics='transit')
+        assert check(*data, nss_statistics='ccd')[0] == F2_ccd
+        np.testing.assert_array_equal(mu_tr, mu_ccd)
+        n = len(data[0]); nu = n - n_param
+        chi2_red = (F2_tr / np.sqrt(9 * nu / 2) + 1 - 2 / (9 * nu))**3      # invert the F2 formula
+        assert chi2_red > 5                                                 # an orbit is a poor fit to these models
+        np.testing.assert_allclose(sig_tr / sig_ccd, np.sqrt(chi2_red / (1 - 2 / (9 * nu))**3)
+                                   / np.sqrt(gaiamock.predict_reduced_chi2_unbinned_data(chi2_red, n_param, n, 8) / (1 - 2 / (9 * (8 * n - n_param)))**3), rtol=1e-9)
+        assert F2_tr < F2_ccd       # far fewer degrees of freedom at the transit level
+
+
+def test_nss_statistics_validation():
+    c_funcs = gaiamock.read_in_C_functions()
+    data = orbit_data_with_noise_scale(c_funcs, 1.0)
+    with pytest.raises(ValueError, match='nss_statistics'):
+        gaiamock.fit_full_astrometric_cascade(*data, c_funcs, skip_acceleration=True, nss_statistics='bogus')
+    with pytest.raises(ValueError, match='binned=True'):
+        gaiamock.fit_full_astrometric_cascade(*data, c_funcs, skip_acceleration=True, binned=False, nss_statistics='transit')
