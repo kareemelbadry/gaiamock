@@ -29,6 +29,15 @@ pip install -e .
 ```
 This installs the required packages (numpy, matplotlib, astropy, healpy, and joblib) and compiles kepler_solve_astrometry.c. GSL is found automatically if `gsl-config` is on your PATH or GSL is in a standard location (Homebrew, conda, /usr/local, /usr). If yours is somewhere else, point pip at it with `GSL_DIR=/path/to/gsl pip install ...`, where /path/to/gsl is the directory containing include/gsl/.
 
+**Faster builds (optional).** When you build from source, extra compiler flags can be passed with `GAIAMOCK_CFLAGS`. They make orbit fitting about 35% faster on x86-64 and about 20% faster on Apple silicon:
+
+```
+GAIAMOCK_CFLAGS="-O3 -march=x86-64-v3" pip install -e .                       # x86-64 (AVX2 and FMA)
+GAIAMOCK_CFLAGS="-O3 -ffast-math -fno-finite-math-only" pip install -e .      # Apple silicon
+```
+
+On x86-64 the gain comes from the newer instruction set, so the library only runs on CPUs that have it (Intel Haswell / AMD Excavator or newer for `x86-64-v3`); `-march=native` targets the machine you build on, which is not safe on a cluster with mixed nodes. If you use `-ffast-math`, keep `-fno-finite-math-only`: the code relies on NaN and infinity checks. These flags change floating-point rounding, so results can differ in the last digits. The default build and the wheels on PyPI do not use them.
+
 Some optional features need extra packages, which pip can install for you with e.g. `pip install -e ".[all]"`:
 `[mcmc]` (emcee and scipy) for the MCMC fitting functions, and `[dust]` ([mwdust](https://github.com/jobovy/mwdust)) to simulate sources distributed throughout the Galaxy with dust.
 
