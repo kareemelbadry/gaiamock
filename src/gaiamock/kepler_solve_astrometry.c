@@ -1365,17 +1365,28 @@ static inline void kepler_cos_sin_orvara(const KeplerOrvaraTable* T, double Mi, 
     *cE = c2;
 }
 
-static int ws_chi2_schur(AstfitWorkspace* w, double P, double phi_p, double ecc, double* chi2_out) {
+/* Everything one Schur-complement chi2 evaluation produces. B (4n) and r (n) are required; cE and sE (n each) may be
+   NULL. The Levenberg-Marquardt normal equations (lm_state_normal) are computed from these. */
+typedef struct { int ok; double P, phi, e, beta[4], G[5][4], Lc[4][4]; double *cE, *sE, *B, *r; } SchurState;
+
+/* The Schur-complement solve at (P, phi_p, ecc): fills s (orbital columns B, G = Q^T B, the Cholesky factor Lc of
+   S = B^T B - G^T G, the coefficients beta, the residual r and, if s->cE is not NULL, cos E and sin E), and returns
+   chi2 = |r|^2 and the largest squared residual and its epoch. Returns 0 if S is too ill-conditioned (see above). */
+static int ws_schur_solve(AstfitWorkspace* w, double P, double phi_p, double ecc, SchurState* s, double* chi2_out, int* worst_out, double* rw_out) {
     int n = w->n, nf = w->nfix;
     double sq = sqrt(1 - ecc * ecc);
-    double* B = w->Qo;
-    double G[5][4] = {{0}}, H[4][4] = {{0}}, b[4] = {0};
+    double* B = s->B;
+    double *cEs = s->cE, *sEs = s->sE;
+    double (*G)[4] = s->G, H[4][4] = {{0}}, b[4] = {0};
+    memset(s->G, 0, sizeof s->G);
+    s->P = P; s->phi = phi_p; s->e = ecc; s->ok = 0;
     KeplerOrvaraTable kt;
     if (ecc > 0.0) kepler_orvara_table(&kt, ecc);
     for (int j = 0; j < n; j++) {
         double cE, sE, M = w->a[j] / P - phi_p;
         if (ecc > 0.0) kepler_cos_sin_orvara(&kt, M, &cE, &sE);
         else { cE = cos(M); sE = sin(M); }
+        if (cEs) { cEs[j] = cE; sEs[j] = sE; }
         double X = cE - ecc, Y = sq * sE;
         double v0 = X * w->sw[j], v1 = Y * w->sw[j], v2 = X * w->cw[j], v3 = Y * w->cw[j];
         B[j] = v0; B[n + j] = v1; B[2 * n + j] = v2; B[3 * n + j] = v3;
@@ -1390,41 +1401,54 @@ static int ws_chi2_schur(AstfitWorkspace* w, double P, double phi_p, double ecc,
         b[0] += v0 * r; b[1] += v1 * r; b[2] += v2 * r; b[3] += v3 * r;
     }
     /* Cholesky of S = H - G^T G */
-    double Lc[4][4];
+    double (*Lc)[4] = s->Lc;
     for (int c = 0; c < 4; c++) {
         for (int d = 0; d <= c; d++) {
-            double s = H[c][d];
-            for (int k = 0; k < nf; k++) s -= G[k][c] * G[k][d];
-            for (int m = 0; m < d; m++) s -= Lc[c][m] * Lc[d][m];
+            double v = H[c][d];
+            for (int k = 0; k < nf; k++) v -= G[k][c] * G[k][d];
+            for (int m = 0; m < d; m++) v -= Lc[c][m] * Lc[d][m];
             if (d == c) {
-                if (!(H[c][c] > 0) || !(s > 1e-4 * H[c][c])) return 0;
-                Lc[c][c] = sqrt(s);
-            } else Lc[c][d] = s / Lc[d][d];
+                if (!(H[c][c] > 0) || !(v > 1e-4 * H[c][c])) return 0;
+                Lc[c][c] = sqrt(v);
+            } else Lc[c][d] = v / Lc[d][d];
         }
     }
-    double y[4], beta[4];
+    double y[4], *beta = s->beta;
     for (int c = 0; c < 4; c++) {
-        double s = b[c];
-        for (int m = 0; m < c; m++) s -= Lc[c][m] * y[m];
-        y[c] = s / Lc[c][c];
+        double v = b[c];
+        for (int m = 0; m < c; m++) v -= Lc[c][m] * y[m];
+        y[c] = v / Lc[c][c];
     }
     for (int c = 3; c >= 0; c--) {
-        double s = y[c];
-        for (int m = c + 1; m < 4; m++) s -= Lc[m][c] * beta[m];
-        beta[c] = s / Lc[c][c];
+        double v = y[c];
+        for (int m = c + 1; m < 4; m++) v -= Lc[m][c] * beta[m];
+        beta[c] = v / Lc[c][c];
     }
     /* residual = r0 - (B - Q G) beta */
     double gam[5] = {0};
     for (int k = 0; k < nf; k++) gam[k] = G[k][0] * beta[0] + G[k][1] * beta[1] + G[k][2] * beta[2] + G[k][3] * beta[3];
     double chi2 = 0.0, rw = 0.0;
     int worst = 0;
+    double* res = s->r;
     for (int j = 0; j < n; j++) {
         double r = w->r0[j] - beta[0] * B[j] - beta[1] * B[n + j] - beta[2] * B[2 * n + j] - beta[3] * B[3 * n + j];
         for (int k = 0; k < nf; k++) r += gam[k] * w->Q[(long)k * n + j];
-        w->res[j] = r;
+        res[j] = r;
         chi2 += r * r;
         if (r * r > rw) { rw = r * r; worst = j; }
     }
+    s->ok = 1;
+    *chi2_out = chi2; *worst_out = worst; *rw_out = rw;
+    return 1;
+}
+
+static int ws_chi2_schur(AstfitWorkspace* w, double P, double phi_p, double ecc, double* chi2_out) {
+    int n = w->n, nf = w->nfix, worst;
+    double chi2, rw;
+    SchurState st; st.cE = NULL; st.sE = NULL; st.B = w->Qo; st.r = w->res;
+    if (!ws_schur_solve(w, P, phi_p, ecc, &st, &chi2, &worst, &rw)) return 0;
+    double* B = st.B;
+    double (*G)[4] = st.G, (*Lc)[4] = st.Lc;
     if (!w->reject) { *chi2_out = chi2; return 1; }
     /* delete-one identity, with leverage h0 + v^T S^-1 v for the projected orbital row v */
     double h = w->h0[worst], z[4];
@@ -1795,9 +1819,9 @@ void get_chi2_astrometry_grid_approx(int n_obs, double *t_ast_yr, double *psi, d
       best 12 are rescored with the exact chi2 (run_astfit_periodogram_multistart_v2_exactgrid scores
       every cell exactly; it is kept for testing).
    4. Local optimization runs in (ln P, e cos phi_p, e sin phi_p), which has no degeneracy at e = 0
-      and wraps phi_p: Levenberg-Marquardt (hk_levenberg_marquardt) from the 8 deepest periodogram
-      minima (circular) and the 12 best eccentric seeds, and the winner gets a final tight Nelder-Mead
-      polish. With outlier rejection, Nelder-Mead (initial ln P step min(0.05, 0.15 P/T)) is used from
+      and wraps phi_p: Levenberg-Marquardt (hk_levenberg_marquardt, analytic Jacobian) from the 8 deepest
+      periodogram minima (circular) and the 12 best eccentric seeds, and the winner gets a final tight
+      Nelder-Mead polish. With outlier rejection, Nelder-Mead (initial ln P step min(0.05, 0.15 P/T)) is used from
       all 12 periodogram minima and the 24 best eccentric seeds instead
       (run_astfit_periodogram_multistart_v2_nm does this in all cases; it is kept for testing).
    If the phi_p bounds do not span a full 2*pi, the local optimization falls back to Nelder-Mead
@@ -1863,10 +1887,24 @@ static double hk_nelder_mead(AstfitWorkspace* w, double* L, double* U, double* x
    Used by run_astfit_periodogram_multistart_v2 for the local optimization from each start (not the final
    polish, which stays Nelder-Mead) when the phi_p bounds span 2 pi and there is no outlier rejection.
    Variable projection: the residual vector r(q) is the whitened residual after the 9 linear parameters are
-   solved for (astfit_workspace_chi2 leaves it in w->res), so chi2 = |r|^2 and the forward-difference
-   Jacobian dr/dq is the full projected Jacobian. Steps are capped at |d ln P| <= 0.5 and |d(e cos, e sin)|
-   <= 0.3 and pulled back inside the bounds with hk_clamp. Iterations stop when chi2 improves by less
-   than atol twice in a row, or when no damped step improves it. */
+   solved for, so chi2 = |r|^2. Steps are capped at |d ln P| <= 0.5 and |d(e cos, e sin)| <= 0.3 and pulled
+   back inside the bounds with hk_clamp. Iterations stop when chi2 improves by less than atol twice in a
+   row, or when no damped step improves it.
+
+   The normal equations J^T J and J^T r (J = dr/dq) are computed analytically (lm_state_normal). With Q the
+   orthonormal fixed columns, B(q) the four orbital columns (X sw, Y sw, X cw, Y cw; X = cos E - e,
+   Y = sqrt(1 - e^2) sin E), G = Q^T B, Bt = B - Q G, S = Bt^T Bt and P_perp the projector off span(Q, B),
+   the derivative of the projected residual is (Golub & Pereyra 1973)
+       dr/dtheta = -P_perp d - Bt S^-1 (dB^T r),      d = sum_c beta_c dB_c/dtheta.
+   Both terms are kept, so this is the exact Jacobian and not the Kaufman approximation. The two terms are
+   orthogonal and r is orthogonal to span(Q, B), so J is never formed:
+       J_p.J_q = d_p.d_q - (Q^T d_p).(Q^T d_q) - z_p.z_q + w_p.w_q,   J_p.r = -sum_c beta_c (dB_p^T r)_c,
+   with z_p = Lc^-1 (B^T d_p - G^T Q^T d_p), w_p = Lc^-1 dB_p^T r and S = Lc Lc^T. One chi2 evaluation
+   (ws_schur_solve, shared with ws_chi2_schur) stores cos E, sin E, B, G, Lc, beta and r, and the
+   normal equations then take one more pass over the epochs with no Kepler solve. The derivatives are taken
+   in (ln P, phi_p, e) and transformed to q. Where the Schur solve is not used (ws_chi2_all fallback) or
+   e < 1e-8 (phi_p undefined), the Jacobian is taken by forward differences instead, as it was everywhere
+   before (run_astfit_periodogram_multistart_v2_fdjac still does this at every step; it is kept for testing). */
 #define ASTFIT_V2_LM_N_CIRC_STARTS 8
 #define ASTFIT_V2_LM_N_ECC_STARTS 12
 #define ASTFIT_V2_LM_MAX_ITER 60
@@ -1880,34 +1918,112 @@ static double hk_resid(AstfitWorkspace* w, double* L, double* U, const double* q
     return c;
 }
 
-/* x = (P, phi_p, e) in/out; returns chi2 (reject_outlier must be 0) */
-static double hk_levenberg_marquardt(AstfitWorkspace* w, double* L, double* U, double* x, int max_iter, double atol) {
+/* chi2 at q with everything lm_state_normal() needs left in s; s->r is the residual. Returns INFINITY outside
+   the bounds. s->ok = 0 if the Schur solve was not usable (then chi2 and s->r come from ws_chi2_all), exactly as in
+   astfit_workspace_chi2(). */
+static double lm_state_eval(AstfitWorkspace* w, double* L, double* U, const double* q, SchurState* s) {
+    double ecc = hypot(q[1], q[2]);
+    if (q[0] < log(L[0]) || q[0] > log(U[0]) || ecc > U[2] + 1e-12 || ecc < L[2] - 1e-12) return INFINITY;
+    double P = exp(q[0]), phi_p = atan2(q[2], q[1]), chi2, rw;
+    int worst, nor;
+    if (ws_schur_solve(w, P, phi_p, ecc, s, &chi2, &worst, &rw)) return chi2;
+    chi2 = ws_chi2_all(w, P, phi_p, ecc, &nor);
+    memcpy(s->r, w->res, sizeof(double) * w->n);
+    return chi2;
+}
+
+/* A = J^T J and g = J^T r for J = dr/d(ln P, e cos phi_p, e sin phi_p) at the state s (see the notes above).
+   Returns 0 if they are not available there. */
+static int lm_state_normal(AstfitWorkspace* w, const SchurState* s, double A[3][3], double g[3]) {
+    if (!s->ok || !(s->e > 1e-8)) return 0;
+    int n = w->n, nf = w->nfix;
+    double e = s->e, sq = sqrt(1 - e * e), iP = 1.0 / s->P, eosq = e / sq;
+    const double* be = s->beta; const double* B = s->B;
+    double Qd[3][5] = {{0}}, Bd[3][4] = {{0}}, Dr[3][4] = {{0}}, dd[6] = {0};
+    for (int j = 0; j < n; j++) {
+        double cE = s->cE[j], sE = s->sE[j], D = 1.0 / (1 - e * cE);     /* D = dE/dM; dE/de = sin E * D */
+        double sw = w->sw[j], cw = w->cw[j];
+        double Uc = be[0] * sw + be[2] * cw, Vc = be[1] * sw + be[3] * cw;  /* model = X Uc + Y Vc */
+        double dXM = -sE * D, dYM = sq * cE * D;
+        double dXe = sE * dXM - 1.0, dYe = sE * dYM - eosq * sE;
+        double mlp = -w->a[j] * iP;                                      /* dM/dlnP; dM/dphi_p = -1 */
+        double dX0 = dXM * mlp, dY0 = dYM * mlp, dX1 = -dXM, dY1 = -dYM;
+        double d1 = Uc * dX1 + Vc * dY1, d0 = -d1 * mlp, d2 = Uc * dXe + Vc * dYe;
+        double r = s->r[j], rs = r * sw, rc = r * cw;
+        double v0 = B[j], v1 = B[n + j], v2 = B[2 * n + j], v3 = B[3 * n + j];
+        for (int k = 0; k < nf; k++) { double qk = w->Q[(long)k * n + j]; Qd[0][k] += qk * d0; Qd[1][k] += qk * d1; Qd[2][k] += qk * d2; }
+        Bd[0][0] += v0 * d0; Bd[0][1] += v1 * d0; Bd[0][2] += v2 * d0; Bd[0][3] += v3 * d0;
+        Bd[1][0] += v0 * d1; Bd[1][1] += v1 * d1; Bd[1][2] += v2 * d1; Bd[1][3] += v3 * d1;
+        Bd[2][0] += v0 * d2; Bd[2][1] += v1 * d2; Bd[2][2] += v2 * d2; Bd[2][3] += v3 * d2;
+        Dr[0][0] += dX0 * rs; Dr[0][1] += dY0 * rs; Dr[0][2] += dX0 * rc; Dr[0][3] += dY0 * rc;
+        Dr[1][0] += dX1 * rs; Dr[1][1] += dY1 * rs; Dr[1][2] += dX1 * rc; Dr[1][3] += dY1 * rc;
+        Dr[2][0] += dXe * rs; Dr[2][1] += dYe * rs; Dr[2][2] += dXe * rc; Dr[2][3] += dYe * rc;
+        dd[0] += d0 * d0; dd[1] += d1 * d0; dd[2] += d1 * d1; dd[3] += d2 * d0; dd[4] += d2 * d1; dd[5] += d2 * d2;
+    }
+    double z[3][4], ww[3][4], A0[3][3], g0[3];
+    for (int p = 0; p < 3; p++) {
+        for (int c = 0; c < 4; c++) {
+            double v = Bd[p][c], u = Dr[p][c];
+            for (int k = 0; k < nf; k++) v -= s->G[k][c] * Qd[p][k];
+            for (int m = 0; m < c; m++) { v -= s->Lc[c][m] * z[p][m]; u -= s->Lc[c][m] * ww[p][m]; }
+            z[p][c] = v / s->Lc[c][c]; ww[p][c] = u / s->Lc[c][c];
+        }
+        g0[p] = -(be[0] * Dr[p][0] + be[1] * Dr[p][1] + be[2] * Dr[p][2] + be[3] * Dr[p][3]);
+    }
+    for (int p = 0; p < 3; p++) for (int q = 0; q <= p; q++) {
+        double v = dd[p * (p + 1) / 2 + q];
+        for (int k = 0; k < nf; k++) v -= Qd[p][k] * Qd[q][k];
+        for (int c = 0; c < 4; c++) v += ww[p][c] * ww[q][c] - z[p][c] * z[q][c];
+        A0[p][q] = A0[q][p] = v;
+    }
+    /* (ln P, phi_p, e) -> (ln P, h, k):  d/dh = cos(phi) d/de - sin(phi)/e d/dphi,  d/dk = sin(phi) d/de + cos(phi)/e d/dphi */
+    double cp = cos(s->phi), sp = sin(s->phi), ie = 1.0 / e;
+    double Mt[3][3] = {{1, 0, 0}, {0, -sp * ie, cp * ie}, {0, cp, sp}};
+    for (int a = 0; a < 3; a++) {
+        g[a] = Mt[0][a] * g0[0] + Mt[1][a] * g0[1] + Mt[2][a] * g0[2];
+        for (int b = 0; b < 3; b++) {
+            double v = 0;
+            for (int p = 0; p < 3; p++) for (int q = 0; q < 3; q++) v += Mt[p][a] * A0[p][q] * Mt[q][b];
+            A[a][b] = v;
+        }
+    }
+    return 1;
+}
+
+/* x = (P, phi_p, e) in/out; returns chi2 (reject_outlier must be 0). analytic = 0 takes the Jacobian by forward
+   differences at every step. */
+static double hk_levenberg_marquardt(AstfitWorkspace* w, double* L, double* U, double* x, int max_iter, double atol, int analytic) {
     int n = w->n;
-    double* buf = (double*)malloc(sizeof(double) * n * 5);
-    double *r = buf, *rt = buf + n, *J = buf + 2 * n;
+    double* buf = (double*)malloc(sizeof(double) * n * 17);
+    SchurState sa = {0, 0, 0, 0, {0}, {{0}}, {{0}}, buf, buf + n, buf + 2 * n, buf + 6 * n};
+    SchurState sb = {0, 0, 0, 0, {0}, {{0}}, {{0}}, buf + 7 * n, buf + 8 * n, buf + 9 * n, buf + 13 * n};
+    SchurState *cur = &sa, *tri = &sb;
+    double* J = buf + 14 * n;
     double q[3] = {log(x[0]), x[2] * cos(x[1]), x[2] * sin(x[1])};
     hk_clamp(q, L, U);
-    double f = hk_resid(w, L, U, q, r);
+    double f = lm_state_eval(w, L, U, q, cur);
     double lam = 1e-3, T = fmax(w->tspan, 1.0);
     int small = 0;
     for (int it = 0; it < max_iter && isfinite(f); it++) {
-        /* forward-difference Jacobian; ln P step scaled to the period resolution P/T */
-        double hs[3] = {1e-6 * fmin(1.0, exp(q[0]) / T), 1e-6, 1e-6};
-        int ok = 1;
-        for (int c = 0; c < 3 && ok; c++) {
-            double qq[3] = {q[0], q[1], q[2]}, h = hs[c];
-            double* Jc = J + (long)c * n;
-            qq[c] += h;
-            double fc = hk_resid(w, L, U, qq, Jc);
-            if (!isfinite(fc)) { qq[c] = q[c] - h; h = -h; fc = hk_resid(w, L, U, qq, Jc); }
-            if (!isfinite(fc)) { ok = 0; break; }
-            for (int j = 0; j < n; j++) Jc[j] = (Jc[j] - r[j]) / h;
-        }
-        if (!ok) break;
         double A[3][3], g[3];
-        for (int a = 0; a < 3; a++) {
-            for (int b = 0; b <= a; b++) A[a][b] = A[b][a] = ws_dot(J + (long)a * n, J + (long)b * n, n);
-            g[a] = ws_dot(J + (long)a * n, r, n);
+        if (!analytic || !lm_state_normal(w, cur, A, g)) {
+            /* forward-difference Jacobian; ln P step scaled to the period resolution P/T */
+            double hs[3] = {1e-6 * fmin(1.0, exp(q[0]) / T), 1e-6, 1e-6};
+            int ok = 1;
+            for (int c = 0; c < 3 && ok; c++) {
+                double qq[3] = {q[0], q[1], q[2]}, h = hs[c];
+                double* Jc = J + (long)c * n;
+                qq[c] += h;
+                double fc = hk_resid(w, L, U, qq, Jc);
+                if (!isfinite(fc)) { qq[c] = q[c] - h; h = -h; fc = hk_resid(w, L, U, qq, Jc); }
+                if (!isfinite(fc)) { ok = 0; break; }
+                for (int j = 0; j < n; j++) Jc[j] = (Jc[j] - cur->r[j]) / h;
+            }
+            if (!ok) break;
+            for (int a = 0; a < 3; a++) {
+                for (int b = 0; b <= a; b++) A[a][b] = A[b][a] = ws_dot(J + (long)a * n, J + (long)b * n, n);
+                g[a] = ws_dot(J + (long)a * n, cur->r, n);
+            }
         }
         int accepted = 0;
         double f_old = f;
@@ -1932,10 +2048,10 @@ static double hk_levenberg_marquardt(AstfitWorkspace* w, double* L, double* U, d
             if (dh > 0.3) s = fmin(s, 0.3 / dh);
             double qn[3] = {q[0] + s * d[0], q[1] + s * d[1], q[2] + s * d[2]};
             hk_clamp(qn, L, U);
-            double fn = hk_resid(w, L, U, qn, rt);
+            double fn = lm_state_eval(w, L, U, qn, tri);
             if (fn < f) {
                 memcpy(q, qn, sizeof q);
-                memcpy(r, rt, sizeof(double) * n);
+                SchurState* t = cur; cur = tri; tri = t;
                 f = fn;
                 lam = fmax(lam / 3, 1e-12);
                 accepted = 1;
@@ -1953,6 +2069,38 @@ static double hk_levenberg_marquardt(AstfitWorkspace* w, double* L, double* U, d
     x[1] += L[1];
     x[2] = hypot(q[1], q[2]);
     return f;
+}
+
+/* J^T J (9 values, row-major) and J^T r (3 values) at (P, phi_p, ecc), for J = dr/d(ln P, e cos phi_p, e sin phi_p):
+   out_analytic from lm_state_normal(), out_numeric from central differences of the projected residual.
+   Returns 1 if the analytic values are available there. Exposed for testing. */
+int get_astfit_lm_normal_equations(int n_obs, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double P, double phi_p, double ecc, double *out_analytic, double *out_numeric) {
+    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, 0);
+    int n = w->n;
+    double L[3] = {1e-3, 0.0, 0.0}, U[3] = {1e9, 2 * PI, 0.9999};
+    double* buf = (double*)malloc(sizeof(double) * n * 12);
+    SchurState s = {0, 0, 0, 0, {0}, {{0}}, {{0}}, buf, buf + n, buf + 2 * n, buf + 6 * n};
+    double *J = buf + 7 * n, *rp = buf + 10 * n, *rm = buf + 11 * n;
+    double q[3] = {log(P), ecc * cos(phi_p), ecc * sin(phi_p)}, A[3][3], g[3];
+    lm_state_eval(w, L, U, q, &s);
+    int ok = lm_state_normal(w, &s, A, g);
+    for (int a = 0; a < 3; a++) {
+        out_analytic[9 + a] = ok ? g[a] : NAN;
+        for (int b = 0; b < 3; b++) out_analytic[3 * a + b] = ok ? A[a][b] : NAN;
+    }
+    for (int c = 0; c < 3; c++) {
+        double h = (c == 0) ? 1e-6 * fmin(1.0, P / fmax(w->tspan, 1.0)) : 1e-6, qq[3] = {q[0], q[1], q[2]};
+        qq[c] = q[c] + h; hk_resid(w, L, U, qq, rp);
+        qq[c] = q[c] - h; hk_resid(w, L, U, qq, rm);
+        for (int j = 0; j < n; j++) J[(long)c * n + j] = (rp[j] - rm[j]) / (2 * h);
+    }
+    for (int a = 0; a < 3; a++) {
+        out_numeric[9 + a] = ws_dot(J + (long)a * n, s.r, n);
+        for (int b = 0; b < 3; b++) out_numeric[3 * a + b] = ws_dot(J + (long)a * n, J + (long)b * n, n);
+    }
+    free(buf);
+    astfit_workspace_free(w);
+    return ok;
 }
 
 typedef struct { double chi2, period, phi_p, ecc; } AstfitSeed;
@@ -2082,7 +2230,7 @@ static void astfit_v2_search(double* t_ast_yr, double* psi, double *plx_factor, 
             }
             double chi2;
             if (lm) {
-                chi2 = hk_levenberg_marquardt(w, L, U, x, ASTFIT_V2_LM_MAX_ITER, ASTFIT_V2_LM_ATOL);
+                chi2 = hk_levenberg_marquardt(w, L, U, x, ASTFIT_V2_LM_MAX_ITER, ASTFIT_V2_LM_ATOL, use_lm == 1);
             } else if (full_phase) {
                 chi2 = hk_nelder_mead(w, L, U, x, ASTFIT_V2_STEP_SCALE, ASTFIT_V2_NM_MAX_ITER, ASTFIT_V2_NM_FSPREAD_TOL, ASTFIT_V2_NM_XSPREAD_TOL);
             } else {
@@ -2123,6 +2271,12 @@ void run_astfit_periodogram_multistart_v2(double* t_ast_yr, double* psi, double 
    from 8 + 12 (the behaviour before Levenberg-Marquardt was added); kept for testing. */
 void run_astfit_periodogram_multistart_v2_nm(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
     astfit_v2_search(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, results, n_obs, reject_outlier, 1, 0);
+}
+
+/* The same search with the Levenberg-Marquardt Jacobian taken by forward differences at every step (the behaviour
+   before the analytic Jacobian was added); kept for testing. */
+void run_astfit_periodogram_multistart_v2_fdjac(double* t_ast_yr, double* psi, double *plx_factor, double* ast_obs, double* ast_err, double* L, double* U, double* results, int n_obs, int reject_outlier) {
+    astfit_v2_search(t_ast_yr, psi, plx_factor, ast_obs, ast_err, L, U, results, n_obs, reject_outlier, 1, 2);
 }
 
 /* The same search with every eccentric-grid cell scored by the exact chi2 (the behaviour before the

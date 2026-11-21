@@ -231,6 +231,65 @@ def test_v2_levenberg_marquardt_matches_nelder_mead():
         assert abs(np.log(lm[0] / nm[0])) < 1e-3 and abs(lm[2] - nm[2]) < 1e-2
 
 
+def lm_normal_equations(c_funcs, data, P, phi_p, ecc):
+    arrs = [np.ascontiguousarray(a, dtype=np.double) for a in data]
+    analytic, numeric = np.zeros(12), np.zeros(12)
+    c_funcs.get_astfit_lm_normal_equations.restype = ctypes.c_int
+    ok = c_funcs.get_astfit_lm_normal_equations(ctypes.c_int(len(arrs[0])), *[ctypes.c_void_p(a.ctypes.data) for a in arrs],
+                                                ctypes.c_double(P), ctypes.c_double(phi_p), ctypes.c_double(ecc),
+                                                ctypes.c_void_p(analytic.ctypes.data), ctypes.c_void_p(numeric.ctypes.data))
+    return ok, analytic[:9].reshape(3, 3), analytic[9:], numeric[:9].reshape(3, 3), numeric[9:]
+
+
+def test_lm_analytic_normal_equations_match_finite_differences():
+    '''
+    the Levenberg-Marquardt steps in periodogram_multistart_v2 use J^T J and J^T r computed analytically, for the
+    Jacobian J of the variable-projected residual; they should match central differences of that residual
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    rng = np.random.default_rng(7)
+    n_checked = 0
+    for k, (period, ecc, a0) in enumerate([(23.0, 0.1, 1.5), (300.0, 0.6, 1.0), (850.0, 0.9, 2.0), (2500.0, 0.4, 3.0)]):
+        data = synthetic_epoch_astrometry(np.random.default_rng(300 + k), c_funcs, period=period, ecc=ecc, a0_mas=a0)
+        chi2 = lambda P, phi_p, e: gaiamock.get_astrometric_chi2(*data, P, phi_p, e, c_funcs)[0]
+        points = [(period, 2 * np.pi * 50.0 / period, max(ecc, 0.05))]          # near the minimum
+        points += [(np.exp(rng.uniform(np.log(12), np.log(4000))), rng.uniform(0, 2 * np.pi), e)
+                   for e in [1e-4, 0.02, 0.3, 0.7, 0.95, 0.985] for _ in range(3)]
+        for P, phi_p, e in points:
+            ok, A, g, A_num, g_num = lm_normal_equations(c_funcs, data, P, phi_p, e)
+            if not ok:
+                continue
+            n_checked += 1
+            scale = np.sqrt(np.outer(np.diag(A_num), np.diag(A_num)))
+            np.testing.assert_allclose(A / scale, A_num / scale, atol=2e-4)
+            assert np.all(np.abs(g - g_num) < 2e-4 * np.sqrt(np.diag(A_num) * chi2(P, phi_p, e)))
+    assert n_checked > 60
+    # not available at e = 0, where phi_p is undefined (the optimizer takes forward differences there)
+    assert not lm_normal_equations(c_funcs, data, 300.0, 1.0, 0.0)[0]
+
+
+def test_v2_analytic_jacobian_matches_forward_differences():
+    '''
+    periodogram_multistart_v2 with the analytic Levenberg-Marquardt Jacobian should reach the same solutions as with
+    the forward-difference Jacobian it replaced (run_astfit_periodogram_multistart_v2_fdjac)
+    '''
+    c_funcs = gaiamock.read_in_C_functions()
+    L = np.array([10.0, 0.0, 0.0]); U = np.array([1e4, 2 * np.pi, 0.99])
+    for k, (period, ecc, a0) in enumerate([(23.0, 0.1, 1.5), (300.0, 0.6, 1.0), (850.0, 0.9, 2.0), (2500.0, 0.4, 3.0),
+                                           (60.0, 0.95, 0.5), (140.0, 0.0, 0.8), (1200.0, 0.75, 0.3), (35.0, 0.5, 0.2)]):
+        data = synthetic_epoch_astrometry(np.random.default_rng(400 + k), c_funcs, period=period, ecc=ecc, a0_mas=a0)
+        arrs = [np.ascontiguousarray(a, dtype=np.double) for a in data]
+        out = {}
+        for name in ['run_astfit_periodogram_multistart_v2', 'run_astfit_periodogram_multistart_v2_fdjac']:
+            r = np.zeros(4)
+            getattr(c_funcs, name)(*[ctypes.c_void_p(a.ctypes.data) for a in arrs + [L, U, r]],
+                                   ctypes.c_int(len(arrs[0])), ctypes.c_int(0))
+            out[name] = r
+        an, fd = out['run_astfit_periodogram_multistart_v2'], out['run_astfit_periodogram_multistart_v2_fdjac']
+        assert abs(an[3] - fd[3]) < 1e-3
+        assert abs(np.log(an[0] / fd[0])) < 1e-4 and abs(an[2] - fd[2]) < 1e-3
+
+
 def test_clip_removes_outliers():
     '''
     reject_outlier="clip" removes several outliers, including one that the plain search absorbs into an e = 0.99
