@@ -33,6 +33,7 @@ classifiers = [
 [project.optional-dependencies]
 mcmc = ["emcee", "scipy"]   # mcmc_fit_with_* functions
 dust = ["mwdust"]           # simulate_many_realizations_* with do_dust=True
+gpu = ["jax"]               # get_astrometric_likelihoods(..., backend='gpu')
 all = ["gaiamock[mcmc,dust]"]
 test = ["pytest"]
 
