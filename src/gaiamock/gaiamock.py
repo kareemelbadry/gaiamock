@@ -2137,21 +2137,30 @@ def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, sam
     '''
     this function evaluates the likelihood for a set of astrometric measurements characterized by 
         (t_ast_yr, psi, plx_factor, ast_obs, ast_err) on a set of sample (P, e, phi_0)
-    
-    on a 14-core M4 Pro laptop, this evaluates 10^7 likelihood samples (75 epochs) in about 6 seconds 
-    returns L = np.exp(lnL)
+    returns lnL
     '''
-    from joblib import Parallel, delayed 
-    edges = np.linspace(0, len(samples[0]), joblib.cpu_count()+1).astype(int)
-    
-    def run_this_j(j):
-        '''Evaluate one chunk of prior samples in a worker process.'''
-        these_samples = [samples[i][edges[j]:edges[j+1]] for i in range(3)]
-        return get_astrometric_likelihoods_worker(t_ast_yr = t_ast_yr, psi = psi, plx_factor = plx_factor, ast_obs = ast_obs, ast_err = ast_err, samples = these_samples)
-        
-    res = Parallel(n_jobs=joblib.cpu_count())(delayed(run_this_j)(x) for x in range(joblib.cpu_count()))
-    lnL = np.concatenate(res)
-    return lnL
+    c_funcs = read_in_C_functions()
+    P, ecc, phi_p = samples
+    t_ast_yr_double = np.ascontiguousarray(t_ast_yr, dtype=np.double)
+    psi_double = np.ascontiguousarray(psi, dtype=np.double)
+    plx_factor_double = np.ascontiguousarray(plx_factor, dtype=np.double)
+    ast_obs_double = np.ascontiguousarray(ast_obs, dtype=np.double)
+    ast_err_double = np.ascontiguousarray(ast_err, dtype=np.double)
+    P_double = np.ascontiguousarray(P, dtype=np.double)
+    phi_p_double = np.ascontiguousarray(phi_p, dtype=np.double)
+    ecc_double = np.ascontiguousarray(ecc, dtype=np.double)
+    lnL_array = np.empty(len(P_double), dtype=np.double)
+
+    n_threads = os.cpu_count() or 1
+    c_funcs.get_likelihoods_astrometry_mt(
+        ctypes.c_int(len(t_ast_yr_double)), ctypes.c_int(len(P_double)),
+        ctypes.c_void_p(t_ast_yr_double.ctypes.data), ctypes.c_void_p(psi_double.ctypes.data),
+        ctypes.c_void_p(plx_factor_double.ctypes.data), ctypes.c_void_p(ast_obs_double.ctypes.data),
+        ctypes.c_void_p(ast_err_double.ctypes.data), ctypes.c_void_p(P_double.ctypes.data),
+        ctypes.c_void_p(phi_p_double.ctypes.data), ctypes.c_void_p(ecc_double.ctypes.data),
+        ctypes.c_void_p(lnL_array.ctypes.data), ctypes.c_int(n_threads),
+    )
+    return lnL_array
  
 def get_good_p0_ball(p0, theta_bounds, nwalkers, scatter = 0.001, max_attempts = 100000):
     '''
