@@ -171,6 +171,26 @@ def test_rejection_sampling_likelihoods_match_gsl():
     np.testing.assert_allclose(lnL, lnL_gsl, rtol=1e-9)
 
 
+@pytest.mark.parametrize('n_samp', [0, 17, 3000])
+def test_rejection_sampling_gpu_matches_gsl(n_samp):
+    '''optional JAX FP64 backend matches GSL to rtol=1e-9 across padded/unpadded chunk sizes'''
+    pytest.importorskip('jax')
+    rng = np.random.default_rng(23)
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(rng, c_funcs, period=300.0, ecc=0.3, a0_mas=2.0)
+    np.random.seed(23)
+    P, ecc, phi_p = gaiamock.generate_prior_samples(n_samp)
+    if n_samp >= 4:
+        P[:4] = [300.0, 200.0, 150.0, 9500.0]
+        ecc[:4] = [0.3, 0.0, 0.99, 0.5]
+        phi_p[:4] = [2 * np.pi * 50.0 / 300.0, 1.0, 2.5, 4.0]
+    lnL_gpu = gaiamock.get_astrometric_likelihoods(*data, (P, ecc, phi_p), backend='gpu', chunk_size=1024)
+    assert len(lnL_gpu) == n_samp
+    if n_samp > 0:
+        lnL_cpu = gaiamock.get_astrometric_likelihoods_worker(*data, (P, ecc, phi_p))
+        np.testing.assert_allclose(lnL_gpu, lnL_cpu, rtol=1e-9)
+
+
 def test_grid_chi2_approximation():
     '''the approximate chi2 used to rank the v2 eccentric grid should be close to the exact chi2 at the grid eccentricities'''
     rng = np.random.default_rng(9)

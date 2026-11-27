@@ -2133,14 +2133,32 @@ def generate_prior_samples(N_samps, P_range = [10, 10000]):
     return (P, ecc, phi_p)
     
 
-def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples):
+def get_astrometric_likelihoods(t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples,
+                                backend='cpu', chunk_size=65536):
     '''
     this function evaluates the likelihood for a set of astrometric measurements characterized by 
         (t_ast_yr, psi, plx_factor, ast_obs, ast_err) on a set of sample (P, e, phi_0)
     
     on a 14-core M4 Pro laptop, this evaluates 10^7 likelihood samples (75 epochs) in about 6 seconds 
-    returns L = np.exp(lnL)
+    returns lnL
+
+    Parameters:
+        backend: 'cpu' (default), 'gpu' (optional JAX FP64 accelerator), or 'auto' (uses GPU if
+            JAX detects a GPU/TPU device, otherwise CPU).
+        chunk_size: batch size for backend='gpu' (padded to avoid XLA recompilation).
     '''
+    if backend == 'auto':
+        from .gpu import has_gpu_accelerator
+        backend = 'gpu' if has_gpu_accelerator() else 'cpu'
+    if backend == 'gpu':
+        from .gpu import get_astrometric_likelihoods_gpu
+        return get_astrometric_likelihoods_gpu(
+            t_ast_yr, psi, plx_factor, ast_obs, ast_err, samples, chunk_size=chunk_size,
+            fallback_fn=get_astrometric_likelihoods_worker,
+        )
+    if backend != 'cpu':
+        raise ValueError(f"Unknown backend={backend!r}; expected 'cpu', 'gpu', or 'auto'.")
+
     from joblib import Parallel, delayed 
     edges = np.linspace(0, len(samples[0]), joblib.cpu_count()+1).astype(int)
     
