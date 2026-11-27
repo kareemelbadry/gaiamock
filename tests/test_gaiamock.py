@@ -155,13 +155,18 @@ def test_fast_chi2_sequence_matches_gsl(reject_outlier):
     np.testing.assert_allclose(scan, expected, rtol=1e-9)
 
 
-def test_rejection_sampling_likelihoods_match_gsl():
-    '''get_likelihoods_astrometry() (rejection sampling) uses the fast chi2; it should match the GSL implementation'''
+@pytest.mark.parametrize('a0_mas', [0.3, 10.0])
+def test_rejection_sampling_likelihoods_match_gsl(a0_mas):
+    '''get_likelihoods_astrometry() (rejection sampling) uses the single-pass Schur fast path with fallback; it should match GSL at low and high SNR'''
     rng = np.random.default_rng(5)
     c_funcs = gaiamock.read_in_C_functions()
-    data = synthetic_epoch_astrometry(rng, c_funcs, period=300.0, ecc=0.3, a0_mas=0.3)
+    data = synthetic_epoch_astrometry(rng, c_funcs, period=300.0, ecc=0.3, a0_mas=a0_mas)
     np.random.seed(5)
     P, ecc, phi_p = gaiamock.generate_prior_samples(3000)
+    # include exact-orbit high-SNR point, e=0, e=0.99, and very long period
+    P[:4] = [300.0, 200.0, 150.0, 9500.0]
+    ecc[:4] = [0.3, 0.0, 0.99, 0.5]
+    phi_p[:4] = [2 * np.pi * 50.0 / 300.0, 1.0, 2.5, 4.0]
     lnL = gaiamock.get_astrometric_likelihoods_worker(*data, (P, ecc, phi_p))
     arrs = [np.ascontiguousarray(a, dtype=np.double) for a in list(data) + [P, phi_p, ecc]]
     lnL_gsl = np.empty(len(P))

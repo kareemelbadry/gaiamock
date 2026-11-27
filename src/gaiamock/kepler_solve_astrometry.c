@@ -1720,9 +1720,7 @@ typedef struct {
     double rr0;             /* |r0|^2 */
 } GridWorkspace;
 
-static GridWorkspace* grid_workspace_create(AstfitWorkspace* w) {
-    grid_tables_init();
-    if (!__atomic_load_n(&grid_ready, __ATOMIC_ACQUIRE)) return NULL;
+static GridWorkspace* grid_workspace_alloc(const AstfitWorkspace* w) {
     int n = w->n, nf = w->nfix;
     GridWorkspace* g = (GridWorkspace*)malloc(sizeof(GridWorkspace));
     g->n = n;
@@ -1741,6 +1739,12 @@ static GridWorkspace* grid_workspace_create(AstfitWorkspace* w) {
         g->rr0 += w->r0[j] * w->r0[j];
     }
     return g;
+}
+
+static GridWorkspace* grid_workspace_create(AstfitWorkspace* w) {
+    grid_tables_init();
+    if (!__atomic_load_n(&grid_ready, __ATOMIC_ACQUIRE)) return NULL;
+    return grid_workspace_alloc(w);
 }
 
 static void grid_workspace_free(GridWorkspace* g) {
@@ -3254,12 +3258,86 @@ void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor
 }
 
 
-/* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc. 
-lnL = -chi2/2 at the best-fit linear parameters, evaluated with the same fast chi2 as the optimizers. 
+/* Single-pass exact Schur-complement chi2 without outlier rejection or residual materialization.
+   Uses precomputed per-epoch products in GridWorkspace (W, s2, sc, c2, rr0) and exact orvara
+   Kepler solve; returns 1 on success, 0 if S is ill-conditioned or chi2 << rr0 (cancellation risk). */
+static int ws_chi2_schur_nodrop(const GridWorkspace* g, const AstfitWorkspace* w, double P, double phi_p, double ecc, double* chi2_out) {
+    int n = g->n;
+    double sq = sqrt(1.0 - ecc * ecc);
+    double aX[12] = {0}, aY[12] = {0}, h[9] = {0};
+    KeplerOrvaraTable kt;
+    if (ecc > 0.0) kepler_orvara_table(&kt, ecc);
+    double invP = 1.0 / P;
+    const double* a_arr = w->a;
+    const double* W = g->W;
+    const double* s2 = g->s2;
+    const double* sc = g->sc;
+    const double* c2 = g->c2;
+    for (int j = 0; j < n; j++) {
+        double cE, sE, M = a_arr[j] * invP - phi_p;
+        if (ecc > 0.0) kepler_cos_sin_orvara(&kt, M, &cE, &sE);
+        else { cE = cos(M); sE = sin(M); }
+        double X = cE - ecc, Y = sq * sE;
+        const double* wj = W + 12 * j;
+        for (int m = 0; m < 12; m++) {
+            aX[m] += X * wj[m];
+            aY[m] += Y * wj[m];
+        }
+        double XX = X * X, XY = X * Y, YY = Y * Y;
+        h[0] += XX * s2[j]; h[1] += XY * s2[j]; h[2] += YY * s2[j];
+        h[3] += XX * sc[j]; h[4] += XY * sc[j]; h[5] += YY * sc[j];
+        h[6] += XX * c2[j]; h[7] += XY * c2[j]; h[8] += YY * c2[j];
+    }
+    double H[4][4] = {
+        {h[0], h[1], h[3], h[4]},
+        {h[1], h[2], h[4], h[5]},
+        {h[3], h[4], h[6], h[7]},
+        {h[4], h[5], h[7], h[8]}
+    };
+    double G[5][4], b[4] = {aX[10], aY[10], aX[11], aY[11]};
+    for (int k = 0; k < 5; k++) {
+        G[k][0] = aX[k]; G[k][1] = aY[k]; G[k][2] = aX[5 + k]; G[k][3] = aY[5 + k];
+    }
+    double Lc[4][4], z[4], drop = 0.0;
+    for (int c = 0; c < 4; c++) {
+        for (int d = 0; d <= c; d++) {
+            double v = H[c][d];
+            for (int k = 0; k < 5; k++) v -= G[k][c] * G[k][d];
+            for (int m = 0; m < d; m++) v -= Lc[c][m] * Lc[d][m];
+            if (d == c) {
+                if (!(H[c][c] > 0.0) || !(v > 1e-4 * H[c][c])) return 0;
+                Lc[c][c] = sqrt(v);
+            } else {
+                Lc[c][d] = v / Lc[d][d];
+            }
+        }
+        double v = b[c];
+        for (int m = 0; m < c; m++) v -= Lc[c][m] * z[m];
+        z[c] = v / Lc[c][c];
+        drop += z[c] * z[c];
+    }
+    double chi2 = g->rr0 - drop;
+    if (!(chi2 >= 1e-6 * g->rr0) || !isfinite(chi2)) return 0;
+    *chi2_out = chi2;
+    return 1;
+}
+
+/* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc.
+lnL = -chi2/2 at the best-fit linear parameters, evaluated with the same fast chi2 as the optimizers.
 */
 void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array){
+    if (n_samp <= 0) return;
     AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, 0);
-    for (int i = 0; i < n_samp; i++) lnL_array[i] = -0.5 * astfit_workspace_chi2(w, P[i], phi_p[i], ecc[i]);
+    GridWorkspace* g = grid_workspace_alloc(w);
+    for (int i = 0; i < n_samp; i++) {
+        double chi2;
+        if (!ws_chi2_schur_nodrop(g, w, P[i], phi_p[i], ecc[i], &chi2)) {
+            int nor;
+            chi2 = ws_chi2_all(w, P[i], phi_p[i], ecc[i], &nor);
+        }
+        lnL_array[i] = -0.5 * chi2;
+    }
+    grid_workspace_free(g);
     astfit_workspace_free(w);
 }
 
