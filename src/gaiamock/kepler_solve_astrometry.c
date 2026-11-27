@@ -1291,25 +1291,47 @@ static double ws_chi2_all(AstfitWorkspace* w, double P, double phi_p, double ecc
 #define KEPLER_ORVARA_PI 3.14159265358979323846
 typedef struct { double e, bounds[13], c[12][6]; } KeplerOrvaraTable;
 
+/* Precomputed k*pi/12, sin(k*pi/12), cos(k*pi/12) for k = 0..12 (avoids 26 trig calls per chi2 evaluation). */
+static const double KEPLER_EN[13] = {
+    0.0,
+    0.26179938779914943654, 0.52359877559829887308, 0.78539816339744830962,
+    1.04719755119659774615, 1.30899693899574718269, 1.57079632679489661923,
+    1.83259571459404605577, 2.09439510239319549231, 2.35619449019234492885,
+    2.61799387799149436539, 2.87979326579064380192, 3.14159265358979323846
+};
+static const double KEPLER_SIN_EN[13] = {
+    0.0,
+    0.25881904510252076235, 0.50000000000000000000, 0.70710678118654752440,
+    0.86602540378443864676, 0.96592582628906828675, 1.00000000000000000000,
+    0.96592582628906828675, 0.86602540378443864676, 0.70710678118654752440,
+    0.50000000000000000000, 0.25881904510252076235, 0.0
+};
+static const double KEPLER_COS_EN[13] = {
+     1.0,
+     0.96592582628906828675,  0.86602540378443864676,  0.70710678118654752440,
+     0.50000000000000000000,  0.25881904510252076235,  0.0,
+    -0.25881904510252076235, -0.50000000000000000000, -0.70710678118654752440,
+    -0.86602540378443864676, -0.96592582628906828675, -1.0
+};
+
 static void kepler_orvara_table(KeplerOrvaraTable* T, double e) {
-    double En[13], s[13], co[13], d1[13], d2[13];
+    double d1[13], d2[13];
     T->e = e;
     for (int k = 0; k < 13; k++) {
-        En[k] = k * KEPLER_ORVARA_PI / 12; s[k] = sin(En[k]); co[k] = cos(En[k]);
-        T->bounds[k] = En[k] - e * s[k];
-        d1[k] = 1 / (1 - e * co[k]);                       /* dE/dM */
-        d2[k] = -0.5 * e * s[k] * d1[k] * d1[k] * d1[k];    /* (d^2E/dM^2) / 2 */
+        T->bounds[k] = KEPLER_EN[k] - e * KEPLER_SIN_EN[k];
+        d1[k] = 1.0 / (1.0 - e * KEPLER_COS_EN[k]);                       /* dE/dM */
+        d2[k] = -0.5 * e * KEPLER_SIN_EN[k] * d1[k] * d1[k] * d1[k];      /* (d^2E/dM^2) / 2 */
     }
     for (int k = 0; k < 12; k++) {
-        double idx = 1 / (T->bounds[k + 1] - T->bounds[k]);
+        double idx = 1.0 / (T->bounds[k + 1] - T->bounds[k]);
         double a1 = d1[k], a2 = d2[k];
-        double b0 = idx * (-a2 - idx * (a1 - idx * KEPLER_ORVARA_PI / 12));
-        double b1 = idx * (-2 * a2 - idx * (a1 - d1[k + 1]));
+        double b0 = idx * (-a2 - idx * (a1 - idx * (KEPLER_ORVARA_PI / 12.0)));
+        double b1 = idx * (-2.0 * a2 - idx * (a1 - d1[k + 1]));
         double b2 = idx * (d2[k + 1] - a2);
-        T->c[k][0] = En[k]; T->c[k][1] = a1; T->c[k][2] = a2;
-        T->c[k][3] = b2 - 4 * b1 + 10 * b0;
-        T->c[k][4] = (-2 * b2 + 7 * b1 - 15 * b0) * idx;
-        T->c[k][5] = (b2 - 3 * b1 + 6 * b0) * idx * idx;
+        T->c[k][0] = KEPLER_EN[k]; T->c[k][1] = a1; T->c[k][2] = a2;
+        T->c[k][3] = b2 - 4.0 * b1 + 10.0 * b0;
+        T->c[k][4] = (-2.0 * b2 + 7.0 * b1 - 15.0 * b0) * idx;
+        T->c[k][5] = (b2 - 3.0 * b1 + 6.0 * b0) * idx * idx;
     }
 }
 
