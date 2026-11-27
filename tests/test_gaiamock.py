@@ -171,6 +171,19 @@ def test_rejection_sampling_likelihoods_match_gsl():
     np.testing.assert_allclose(lnL, lnL_gsl, rtol=1e-9)
 
 
+def test_rejection_sampling_multithreaded_matches_single_thread():
+    '''in-C pthreads get_astrometric_likelihoods matches single-threaded evaluation and handles empty input'''
+    rng = np.random.default_rng(17)
+    c_funcs = gaiamock.read_in_C_functions()
+    data = synthetic_epoch_astrometry(rng, c_funcs, period=300.0, ecc=0.3, a0_mas=1.0)
+    np.random.seed(17)
+    P, ecc, phi_p = gaiamock.generate_prior_samples(6000)
+    lnL_mt = gaiamock.get_astrometric_likelihoods(*data, (P, ecc, phi_p))
+    lnL_1c = gaiamock.get_astrometric_likelihoods_worker(*data, (P, ecc, phi_p))
+    np.testing.assert_allclose(lnL_mt, lnL_1c, rtol=1e-13)
+    assert len(gaiamock.get_astrometric_likelihoods(*data, (P[:0], ecc[:0], phi_p[:0]))) == 0
+
+
 def test_grid_chi2_approximation():
     '''the approximate chi2 used to rank the v2 eccentric grid should be close to the exact chi2 at the grid eccentricities'''
     rng = np.random.default_rng(9)

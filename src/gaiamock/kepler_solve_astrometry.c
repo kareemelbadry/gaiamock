@@ -9,6 +9,9 @@ On my local cluster, I compiled with:
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <pthread.h>
+#endif
 #include <gsl/gsl_matrix.h>
 #include <gsl/gsl_vector.h>
 #include <gsl/gsl_blas.h>
@@ -3254,13 +3257,56 @@ void run_astfit_parallax_prior(double* t_ast_yr, double* psi, double *plx_factor
 }
 
 
-/* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc. 
-lnL = -chi2/2 at the best-fit linear parameters, evaluated with the same fast chi2 as the optimizers. 
+typedef struct {
+    double *t, *psi, *pf, *y, *err;
+    int n_obs;
+    const double *P, *phi_p, *ecc;
+    double *lnL_array;
+    int start, end;
+} LikThreadArgs;
+
+static void* lik_worker_range(void* arg) {
+    LikThreadArgs* a = (LikThreadArgs*)arg;
+    AstfitWorkspace* w = astfit_workspace_create(a->t, a->psi, a->pf, a->y, a->err, a->n_obs, 0);
+    for (int i = a->start; i < a->end; i++) {
+        a->lnL_array[i] = -0.5 * astfit_workspace_chi2(w, a->P[i], a->phi_p[i], a->ecc[i]);
+    }
+    astfit_workspace_free(w);
+    return NULL;
+}
+
+/* Multi-threaded rejection-sampling likelihood evaluator (portable POSIX pthreads; falls back to
+   1 thread on Windows or when n_threads <= 1 / n_samp < 4096). */
+void get_likelihoods_astrometry_mt(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array, int n_threads) {
+    if (n_samp <= 0) return;
+    if (n_threads < 1) n_threads = 1;
+    if (n_threads > n_samp) n_threads = n_samp;
+#if !defined(_WIN32)
+    if (n_threads > 1 && n_samp >= 4096) {
+        pthread_t* tids = (pthread_t*)malloc(sizeof(pthread_t) * n_threads);
+        LikThreadArgs* args = (LikThreadArgs*)malloc(sizeof(LikThreadArgs) * n_threads);
+        int base = n_samp / n_threads, rem = n_samp % n_threads, cur = 0;
+        for (int t = 0; t < n_threads; t++) {
+            int sz = base + (t < rem ? 1 : 0);
+            args[t] = (LikThreadArgs){t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, P, phi_p, ecc, lnL_array, cur, cur + sz};
+            cur += sz;
+            pthread_create(&tids[t], NULL, lik_worker_range, &args[t]);
+        }
+        for (int t = 0; t < n_threads; t++) pthread_join(tids[t], NULL);
+        free(tids);
+        free(args);
+        return;
+    }
+#endif
+    LikThreadArgs single = {t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, P, phi_p, ecc, lnL_array, 0, n_samp};
+    lik_worker_range(&single);
+}
+
+/* This is a Joker-like approach, which is useful at low SNR.  n_samp is length of the samples array; n_obs is length of the observations array. This populates the lnL_array with likelihoods corresponding to the arrays P, phi_p, ecc.
+lnL = -chi2/2 at the best-fit linear parameters, evaluated with the same fast chi2 as the optimizers.
 */
 void get_likelihoods_astrometry(int n_obs, int n_samp, double *t_ast_yr, double *psi, double *plx_factor, double *ast_obs, double *ast_err, double *P, double *phi_p, double *ecc, double *lnL_array){
-    AstfitWorkspace* w = astfit_workspace_create(t_ast_yr, psi, plx_factor, ast_obs, ast_err, n_obs, 0);
-    for (int i = 0; i < n_samp; i++) lnL_array[i] = -0.5 * astfit_workspace_chi2(w, P[i], phi_p[i], ecc[i]);
-    astfit_workspace_free(w);
+    get_likelihoods_astrometry_mt(n_obs, n_samp, t_ast_yr, psi, plx_factor, ast_obs, ast_err, P, phi_p, ecc, lnL_array, 1);
 }
 
 /* The previous implementation of get_likelihoods_astrometry() (GSL normal equations); kept for testing. */

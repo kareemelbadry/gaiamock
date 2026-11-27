@@ -73,6 +73,9 @@ class build_ctypes_library(build_ext):
         self.compiler.linker_so[1:1] = [f'-L{d}' for d in library_dirs]
         for ext in self.extensions:
             ext.include_dirs += include_dirs
+            if os.name != 'nt':
+                ext.extra_compile_args += ['-pthread']
+                ext.extra_link_args += ['-pthread']
             # optional user flags go last so they override the defaults (e.g. -O3 after Python's own -O2)
             ext.extra_compile_args += shlex.split(os.environ.get('GAIAMOCK_CFLAGS', ''))
             # record where GSL is so the library loads without needing LD_LIBRARY_PATH or `module load gsl`
